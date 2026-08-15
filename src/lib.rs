@@ -9,12 +9,17 @@
 //! what makes the deadline enforceable and what keeps Typst's process-global state
 //! from accumulating. See [`worker`] for why that is not optional.
 
+pub mod api;
+pub mod auth;
 pub mod bundle;
 pub mod compile;
+pub mod config;
 pub mod diagnostics;
 pub mod fonts;
 pub mod principal;
 pub mod protocol;
+pub mod render;
+pub mod server;
 pub mod signing;
 pub mod spawn;
 pub mod store;
