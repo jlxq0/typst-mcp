@@ -105,6 +105,26 @@ pub enum StoreError {
     Io { path: PathBuf, source: io::Error },
 }
 
+/// Optional metadata recorded alongside a stored file.
+///
+/// Grouped rather than passed as two adjacent `Option<String>` parameters, which are
+/// trivially swapped at a call site and would silently record a content type as a
+/// filename.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Meta {
+    pub filename: Option<String>,
+    pub content_type: Option<String>,
+}
+
+impl Meta {
+    pub fn new(filename: impl Into<String>, content_type: impl Into<String>) -> Self {
+        Self {
+            filename: Some(filename.into()),
+            content_type: Some(content_type.into()),
+        }
+    }
+}
+
 /// One stored item.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Entry {
@@ -169,11 +189,10 @@ impl Store {
         kind: Kind,
         name: &str,
         bytes: &[u8],
-        filename: Option<String>,
-        content_type: Option<String>,
+        meta: Meta,
     ) -> Result<Entry, StoreError> {
         let id = new_id(kind);
-        self.put_with_id(tenant, kind, &id, name, bytes, filename, content_type)
+        self.put_with_id(tenant, kind, &id, name, bytes, meta)
     }
 
     /// Store under an existing id, e.g. a second file belonging to one output.
@@ -184,8 +203,7 @@ impl Store {
         id: &str,
         name: &str,
         bytes: &[u8],
-        filename: Option<String>,
-        content_type: Option<String>,
+        meta: Meta,
     ) -> Result<Entry, StoreError> {
         let id = validate_id(kind, id)?;
         let size = bytes.len() as u64;
@@ -216,8 +234,8 @@ impl Store {
             bytes: size,
             created_at: now,
             expires_at: now + self.limits.ttl(kind).as_secs(),
-            filename,
-            content_type,
+            filename: meta.filename,
+            content_type: meta.content_type,
         };
         self.write_meta(&dir, &entry)?;
 
@@ -547,7 +565,13 @@ mod tests {
         let (_dir, store) = store(Limits::default());
         let alice = tenant("alice");
         let entry = store
-            .put(&alice, Kind::Output, "doc.pdf", b"%PDF-1.7", None, None)
+            .put(
+                &alice,
+                Kind::Output,
+                "doc.pdf",
+                b"%PDF-1.7",
+                Meta::default(),
+            )
             .expect("stores");
 
         assert!(entry.id.starts_with("job_"));
@@ -566,7 +590,7 @@ mod tests {
         let (_dir, store) = store(Limits::default());
         let (alice, bob) = (tenant("alice"), tenant("bob"));
         let entry = store
-            .put(&alice, Kind::Output, "doc.pdf", b"secret", None, None)
+            .put(&alice, Kind::Output, "doc.pdf", b"secret", Meta::default())
             .expect("stores");
 
         // Bob has a perfectly valid id — it just is not his.
@@ -586,7 +610,7 @@ mod tests {
         let (_dir, store) = store(Limits::default());
         let alice = tenant("alice");
         let asset = store
-            .put(&alice, Kind::Asset, "logo.png", b"\x89PNG", None, None)
+            .put(&alice, Kind::Asset, "logo.png", b"\x89PNG", Meta::default())
             .expect("stores");
         // The prefix makes the id self-describing, so it cannot be used as another kind.
         assert!(matches!(
@@ -623,7 +647,13 @@ mod tests {
         let (_dir, store) = store(Limits::default());
         let alice = tenant("alice");
         let entry = store
-            .put(&alice, Kind::Output, "../../escaped.pdf", b"x", None, None)
+            .put(
+                &alice,
+                Kind::Output,
+                "../../escaped.pdf",
+                b"x",
+                Meta::default(),
+            )
             .expect("stores");
         // It was stored under a flattened name inside the entry directory.
         let escaped = store.get(&alice, Kind::Output, &entry.id, "....escaped.pdf");
@@ -644,7 +674,7 @@ mod tests {
         let (_dir, store) = store(limits);
         let alice = tenant("alice");
         let entry = store
-            .put(&alice, Kind::Output, "doc.pdf", b"x", None, None)
+            .put(&alice, Kind::Output, "doc.pdf", b"x", Meta::default())
             .expect("stores");
 
         assert!(matches!(
@@ -667,9 +697,8 @@ mod tests {
                 &alice,
                 Kind::Output,
                 "doc.pdf",
-                &vec![0u8; 1024],
-                None,
-                None,
+                &[0u8; 1024],
+                Meta::default(),
             )
             .expect("stores");
         assert_eq!(store.used_bytes(), 1024);
@@ -690,10 +719,10 @@ mod tests {
         let (_dir, store) = store(limits);
         let alice = tenant("alice");
         store
-            .put(&alice, Kind::Asset, "a.bin", &vec![0u8; 80], None, None)
+            .put(&alice, Kind::Asset, "a.bin", &[0u8; 80], Meta::default())
             .expect("fits");
         let err = store
-            .put(&alice, Kind::Asset, "b.bin", &vec![0u8; 80], None, None)
+            .put(&alice, Kind::Asset, "b.bin", &[0u8; 80], Meta::default())
             .expect_err("over budget");
         assert!(
             matches!(err, StoreError::TenantFull { limit: 100, .. }),
@@ -713,9 +742,8 @@ mod tests {
                 &tenant("alice"),
                 Kind::Asset,
                 "a.bin",
-                &vec![0u8; 90],
-                None,
-                None,
+                &[0u8; 90],
+                Meta::default(),
             )
             .expect("alice fits");
         store
@@ -723,9 +751,8 @@ mod tests {
                 &tenant("bob"),
                 Kind::Asset,
                 "b.bin",
-                &vec![0u8; 90],
-                None,
-                None,
+                &[0u8; 90],
+                Meta::default(),
             )
             .expect("bob has his own budget");
     }
@@ -741,16 +768,16 @@ mod tests {
         let alice = tenant("alice");
 
         let first = store
-            .put(&alice, Kind::Asset, "a.bin", &vec![0u8; 100], None, None)
+            .put(&alice, Kind::Asset, "a.bin", &[0u8; 100], Meta::default())
             .expect("stores");
         // Same-second timestamps would make eviction order ambiguous.
         std::thread::sleep(Duration::from_millis(1100));
         let second = store
-            .put(&alice, Kind::Asset, "b.bin", &vec![0u8; 100], None, None)
+            .put(&alice, Kind::Asset, "b.bin", &[0u8; 100], Meta::default())
             .expect("stores");
         std::thread::sleep(Duration::from_millis(1100));
         let third = store
-            .put(&alice, Kind::Asset, "c.bin", &vec![0u8; 100], None, None)
+            .put(&alice, Kind::Asset, "c.bin", &[0u8; 100], Meta::default())
             .expect("stores");
 
         assert!(
@@ -774,7 +801,7 @@ mod tests {
         let (_dir, store) = store(Limits::default());
         let alice = tenant("alice");
         let entry = store
-            .put(&alice, Kind::Output, "doc.pdf", b"%PDF-", None, None)
+            .put(&alice, Kind::Output, "doc.pdf", b"%PDF-", Meta::default())
             .expect("stores");
         store
             .put_with_id(
@@ -783,8 +810,7 @@ mod tests {
                 &entry.id,
                 "page-1.png",
                 b"\x89PNG",
-                None,
-                None,
+                Meta::default(),
             )
             .expect("stores alongside");
 
@@ -814,7 +840,7 @@ mod tests {
         let id = {
             let store = Store::open(dir.path(), Limits::default()).expect("opens");
             let entry = store
-                .put(&alice, Kind::Asset, "a.bin", &vec![0u8; 512], None, None)
+                .put(&alice, Kind::Asset, "a.bin", &[0u8; 512], Meta::default())
                 .expect("stores");
             entry.id
         };
@@ -832,7 +858,7 @@ mod tests {
         {
             let store = Store::open(dir.path(), Limits::default()).expect("opens");
             let entry = store
-                .put(&alice, Kind::Asset, "a.bin", b"data", None, None)
+                .put(&alice, Kind::Asset, "a.bin", b"data", Meta::default())
                 .expect("stores");
             // Simulate a crash between writing the payload and its metadata.
             let meta = dir
@@ -863,11 +889,13 @@ mod tests {
         let (_dir, store) = store(Limits::default());
         let (alice, bob) = (tenant("alice"), tenant("bob"));
         store
-            .put(&alice, Kind::Asset, "a", b"1", None, None)
+            .put(&alice, Kind::Asset, "a", b"1", Meta::default())
             .unwrap();
-        store.put(&bob, Kind::Asset, "b", b"2", None, None).unwrap();
         store
-            .put(&alice, Kind::Asset, "c", b"3", None, None)
+            .put(&bob, Kind::Asset, "b", b"2", Meta::default())
+            .unwrap();
+        store
+            .put(&alice, Kind::Asset, "c", b"3", Meta::default())
             .unwrap();
 
         let listed = store.list(&alice, Kind::Asset);

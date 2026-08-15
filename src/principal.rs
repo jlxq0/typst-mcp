@@ -368,7 +368,7 @@ mod tests {
         let keys = ApiKeys::parse(",,alice:,:sk_x,  ,alice:sk_ok");
         // `alice:` has no secret and `:sk_x` has no label, so both fall back to the
         // bare-key branch; only genuinely empty entries disappear.
-        assert!(keys.len() >= 1);
+        assert!(!keys.is_empty());
         assert!(keys.authenticate("sk_ok").is_some());
         assert!(keys.authenticate("").is_none());
     }
