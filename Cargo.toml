@@ -41,6 +41,17 @@ base64 = "0.22"
 # --- per-compile address-space cap, imposed by the worker on itself ---
 rlimit = "0.10"
 
+# --- identity, signed URLs, ids ---
+# sha2/hmac for tenant derivation and URL signatures; subtle for constant-time
+# comparison (a naive == on a secret is a timing oracle); zeroize so a key does not
+# linger in freed memory.
+sha2 = "0.10"
+hmac = "0.12"
+subtle = "2.6"
+hex = "0.4"
+zeroize = { version = "1", features = ["zeroize_derive"] }
+ulid = "1"
+
 # --- template manifests + data validation ---
 toml = "1.1"
 jsonschema = { version = "0.49", default-features = false }
