@@ -29,6 +29,10 @@ pub struct AppState {
 }
 
 /// Build the router.
+///
+/// `/mcp` is mounted only when OIDC is configured. An MCP endpoint that accepted
+/// static keys would put a long-lived shared secret into a desktop client's config
+/// file, which is exactly what the OAuth flow exists to avoid.
 pub fn router(state: AppState) -> axum::Router {
     let protected = axum::Router::new()
         .route("/render", post(render))
@@ -44,7 +48,7 @@ pub fn router(state: AppState) -> axum::Router {
         ))
         .with_state(state.clone());
 
-    axum::Router::new()
+    let mut app = axum::Router::new()
         .route("/health", get(health))
         .route(
             "/.well-known/oauth-protected-resource",
@@ -54,6 +58,45 @@ pub fn router(state: AppState) -> axum::Router {
         // or a signature, and does its own check as its first action.
         .route("/files/{tenant}/{job}/{name}", get(download))
         .nest("/api/v1", protected)
+        .with_state(state.clone());
+
+    if state.oidc_auth.is_configured() {
+        app = app.merge(mcp_router(state));
+    }
+    app
+}
+
+/// The MCP endpoint, behind OIDC.
+///
+/// The service holds no caller identity. rmcp builds one service per *session* and
+/// injects each HTTP request's `Parts` into the tool context, so a tool reads the
+/// authenticated principal from the request it is actually serving. Baking a tenant
+/// into the service at construction would tie identity to the session instead, and two
+/// concurrent sessions could then be handed each other's storage.
+fn mcp_router(state: AppState) -> axum::Router {
+    use rmcp::transport::streamable_http_server::{
+        StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
+    };
+
+    let render = Arc::clone(&state.render);
+    let config = Arc::clone(&state.config);
+    let service = StreamableHttpService::new(
+        move || {
+            Ok(crate::mcp::TypstMcp::new(
+                Arc::clone(&render),
+                Arc::clone(&config),
+            ))
+        },
+        LocalSessionManager::default().into(),
+        StreamableHttpServerConfig::default(),
+    );
+
+    axum::Router::new()
+        .nest_service("/mcp", service)
+        .layer(axum::middleware::from_fn_with_state(
+            state.oidc_auth.clone(),
+            crate::auth::require_oidc,
+        ))
         .with_state(state)
 }
 

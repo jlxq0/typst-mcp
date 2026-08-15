@@ -16,6 +16,8 @@ pub mod compile;
 pub mod config;
 pub mod diagnostics;
 pub mod fonts;
+pub mod mcp;
+pub mod oidc;
 pub mod principal;
 pub mod protocol;
 pub mod render;

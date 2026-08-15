@@ -59,6 +59,29 @@ Specs in `.spec/`, ordered tasks in `Plan.md`, success criteria in `GOAL.md`.
   provides (brand colours, chart helpers). The prelude shifts line numbers, so
   `templates::SourceMap` subtracts it before diagnostics are returned.
 
+- **MCP 2026-07-28 removed sessions and the `initialize` handshake.** Every request
+  carries `_meta` with `io.modelcontextprotocol/protocolVersion` and
+  `clientCapabilities`, and a streamable-HTTP POST must additionally send
+  `Mcp-Protocol-Version` and `Mcp-Method` headers matching the body — plus `Mcp-Name`
+  for `tools/call`. A request missing `_meta` gets `-32602`; one missing the headers
+  gets `-32020`. `tests/mcp.rs` encodes the working shape.
+
+- **rmcp's `#[tool_handler]` defaults to `Self::tool_router()` — a call, not the
+  field.** Left at the default it rebuilds the entire tool list on every invocation
+  and the cached `tool_router` field reads as dead code. Use
+  `#[tool_handler(router = self.tool_router)]`.
+
+- **Never cache the caller on an rmcp service.** rmcp builds one service per *session*,
+  and a session is not a caller. Read the principal from each request instead: rmcp
+  injects the HTTP `Parts` into `RequestContext.extensions`, so
+  `ctx.extensions.get::<http::request::Parts>()` reaches what the auth middleware left
+  there. An earlier version handed the tenant to the service factory through a shared
+  slot, which two concurrent sessions could swap.
+
+- **`jsonwebtoken` defaults to 60 seconds of `exp`/`nbf` leeway.** Set
+  `validation.leeway` explicitly so the tolerance is a decision rather than an
+  inherited default, and remember it when writing a test for an expired token.
+
 ## Conventions
 
 - Untrusted paths are interpreted in `bundle.rs` and nowhere else. **Reject, never

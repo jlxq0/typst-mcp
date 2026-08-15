@@ -44,6 +44,18 @@ base64 = "0.22"
 # --- per-compile address-space cap, imposed by the worker on itself ---
 rlimit = "0.10"
 
+# --- MCP ---
+# 3.x, not the 1.7 the sibling MCP servers pin. The protocol version is set
+# explicitly to V_2026_07_28: it is in KNOWN_VERSIONS, but LATEST still points at
+# 2025-11-25 upstream (PR #1105). Drop the override when that lands.
+rmcp = { version = "3.1", features = [
+    "server",
+    "macros",
+    "schemars",
+    "transport-streamable-http-server",
+    "transport-streamable-http-server-session",
+] }
+
 # --- HTTP server ---
 axum = { version = "0.8", features = ["macros"] }
 tower = "0.5"
@@ -54,6 +66,11 @@ bytes = "1"
 # --- logging ---
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# --- OIDC token validation (Entra) ---
+# rustls only: no OpenSSL in the image, and nothing to keep patched.
+jsonwebtoken = "9.3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 # --- identity, signed URLs, ids ---
 # sha2/hmac for tenant derivation and URL signatures; subtle for constant-time

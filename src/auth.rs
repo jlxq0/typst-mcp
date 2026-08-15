@@ -10,7 +10,10 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 
+use std::sync::Arc;
+
 use crate::config::OidcConfig;
+use crate::oidc::{TokenError, TokenValidator};
 use crate::principal::{ApiKeys, Principal};
 
 /// Extracted from a request by the middleware and available to handlers.
@@ -32,6 +35,8 @@ pub enum AuthError {
     Rejected,
     /// This door is not configured on this deployment.
     Unavailable,
+    /// The identity provider could not be reached.
+    ProviderUnavailable,
 }
 
 impl AuthError {
@@ -47,6 +52,21 @@ impl AuthError {
             Self::Malformed => "the Authorization header must be `Bearer <credential>`",
             Self::Rejected => "the credential was not accepted",
             Self::Unavailable => "this endpoint is not configured on this server",
+            Self::ProviderUnavailable => {
+                "the identity provider could not be reached; this is a server-side \
+                 problem, so retry rather than re-authenticating"
+            }
+        }
+    }
+
+    /// The status to answer with.
+    ///
+    /// A provider we cannot reach is a 503: answering 401 would send a caller off to
+    /// re-authenticate against a problem that is not theirs.
+    pub fn status(self) -> StatusCode {
+        match self {
+            Self::ProviderUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+            _ => StatusCode::UNAUTHORIZED,
         }
     }
 }
@@ -117,6 +137,7 @@ impl ApiKeyAuth {
 #[derive(Clone)]
 pub struct OidcAuth {
     config: Option<OidcConfig>,
+    validator: Option<Arc<TokenValidator>>,
     challenge: String,
 }
 
@@ -129,7 +150,32 @@ impl OidcAuth {
             ),
             None => "Bearer".to_owned(),
         };
-        Self { config, challenge }
+        let validator = config.clone().map(TokenValidator::new);
+        Self {
+            config,
+            validator,
+            challenge,
+        }
+    }
+
+    /// Validate the request's bearer token.
+    pub async fn authenticate(&self, headers: &HeaderMap) -> Result<Authenticated, AuthError> {
+        let Some(validator) = &self.validator else {
+            return Err(AuthError::Unavailable);
+        };
+        let token = bearer(headers)?;
+        match validator.validate(token).await {
+            Ok(principal) => Ok(Authenticated {
+                fingerprint: crate::principal::fingerprint(principal.display()),
+                principal,
+            }),
+            // A provider we cannot reach is our failure, not a bad credential — telling
+            // the caller their token was rejected would send them to re-authenticate
+            // for no reason.
+            Err(TokenError::ProviderUnavailable) => Err(AuthError::ProviderUnavailable),
+            Err(TokenError::Malformed) => Err(AuthError::Malformed),
+            Err(_) => Err(AuthError::Rejected),
+        }
     }
 
     pub fn is_configured(&self) -> bool {
@@ -156,7 +202,7 @@ pub fn unauthorized(error: AuthError, challenge: &str) -> Response {
         "message": error.message(),
     });
     (
-        StatusCode::UNAUTHORIZED,
+        error.status(),
         [(header::WWW_AUTHENTICATE, challenge)],
         axum::Json(body),
     )
@@ -170,6 +216,21 @@ pub async fn require_api_key(
     next: Next,
 ) -> Response {
     match auth.authenticate(request.headers()) {
+        Ok(authenticated) => {
+            request.extensions_mut().insert(authenticated);
+            next.run(request).await
+        }
+        Err(error) => unauthorized(error, auth.challenge()),
+    }
+}
+
+/// Middleware for `/mcp`: an OIDC token required.
+pub async fn require_oidc(
+    axum::extract::State(auth): axum::extract::State<OidcAuth>,
+    mut request: Request,
+    next: Next,
+) -> Response {
+    match auth.authenticate(request.headers()).await {
         Ok(authenticated) => {
             request.extensions_mut().insert(authenticated);
             next.run(request).await
