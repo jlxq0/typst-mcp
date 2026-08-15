@@ -1,0 +1,40 @@
+[package]
+name = "typst-mcp"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+license = "MIT"
+description = "MCP server and REST API that renders branded PDFs with Typst"
+
+[dependencies]
+# --- Typst, all pinned in lockstep. `cargo tree -p comemo -p tiny-skia`
+#     after any bump: those two must match what typst/typst-render resolve to.
+typst = "0.15.1"
+typst-library = "0.15.1"
+# `PagedDocument` / `Page` live here, not in `typst` — `typst::compile::<T>` is
+# generic over `Output` and typst-layout is what implements it.
+typst-layout = "0.15.1"
+typst-pdf = "0.15.1"
+typst-render = "0.15.1"
+typst-kit = { version = "0.15.1", default-features = false, features = [
+    "embedded-fonts",
+    "scan-fonts",
+] }
+comemo = "0.5"
+tiny-skia = "0.12"
+
+# --- serde ---
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# --- errors ---
+anyhow = "1.0"
+thiserror = "2.0"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+panic = "abort"
+strip = true
+lto = "thin"

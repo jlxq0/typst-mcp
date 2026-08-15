@@ -1,0 +1,47 @@
+# cargo-deny configuration. Run locally with `cargo deny check`.
+# Loosened just enough to start; tighten as the dependency tree settles.
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = []
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[licenses]
+version = 2
+# Permissive licenses only. Add to this list deliberately. matrix-mcp
+# itself is MIT-licensed; allowing strong-copyleft (AGPL/GPL) deps
+# would force the whole crate into the same posture, which we don't
+# want for a permissive project.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "MPL-2.0",
+    "CC0-1.0",
+    # CDLA-Permissive-2.0 is used by webpki-roots (Mozilla CA bundle, pulled
+    # in transitively by reqwest+rustls). It's a permissive license written
+    # for "shared data" rather than code, mostly equivalent to MIT in effect
+    # for our use case: attribution required, no patent grant claims, no
+    # share-alike. https://cdla.dev/permissive-2-0/
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.8
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
