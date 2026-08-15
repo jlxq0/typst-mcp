@@ -115,8 +115,11 @@ impl CompileService {
                     stderr.read_to_end(&mut buf).await.map(|_| buf)
                 },
             );
-            write?;
-            Ok::<_, std::io::Error>((out?, err?))
+            // The write error is deliberately *not* propagated here. A worker that dies
+            // before draining the job frame gives us EPIPE, and reporting that would
+            // discard the stderr explaining why it died — which is the only useful
+            // information in that failure. Carry it and let the exit status decide.
+            Ok::<_, std::io::Error>((out?, err?, write.err()))
         };
 
         let deadline = tokio::time::timeout(self.config.timeout, async {
@@ -125,7 +128,7 @@ impl CompileService {
             Ok::<_, std::io::Error>((io, status))
         });
 
-        let ((out, err), status) = match deadline.await {
+        let ((out, err, write_err), status) = match deadline.await {
             Ok(result) => result?,
             Err(_) => {
                 // The only thing that actually stops a runaway compile. A thread
@@ -143,6 +146,12 @@ impl CompileService {
                 exit: describe(&status),
                 stderr: String::from_utf8_lossy(&err).trim().to_owned(),
             });
+        }
+
+        // The child exited cleanly and produced a frame, so a write error here means we
+        // could not deliver the whole job — a real failure, just a rarer one.
+        if let Some(err) = write_err {
+            return Err(SpawnError::Io(err));
         }
 
         Ok(read_frame(out.as_slice())?)

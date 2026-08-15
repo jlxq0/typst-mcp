@@ -15,5 +15,7 @@ pub mod diagnostics;
 pub mod fonts;
 pub mod protocol;
 pub mod spawn;
+pub mod templates;
+pub mod typst_value;
 pub mod worker;
 pub mod world;

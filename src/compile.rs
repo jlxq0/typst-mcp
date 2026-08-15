@@ -73,19 +73,30 @@ pub struct CompileOutput {
 
 /// Why a compile did not produce a PDF.
 #[derive(Debug, Error)]
-pub enum CompileError {
+pub enum CompileErrorKind {
     /// The document did not compile. The diagnostics are the useful part.
-    #[error("compilation failed with {} error(s)", .diagnostics.iter().filter(|d| d.severity == Severity::Error).count())]
-    Source { diagnostics: Vec<Diagnostic> },
+    #[error("compilation failed")]
+    Source,
     /// The document compiled but is longer than the caller is allowed to produce.
     #[error("document has {pages} pages; the limit is {limit}")]
     TooManyPages { pages: usize, limit: usize },
     /// PDF export failed after a successful layout. Rare.
     #[error("PDF export failed")]
-    Export { diagnostics: Vec<Diagnostic> },
+    Export,
     /// A preview page number that does not exist.
     #[error("page {page} was requested for preview but the document has {pages}")]
     NoSuchPage { page: usize, pages: usize },
+    /// The page is too large to rasterise within the pixel budget.
+    #[error(
+        "page {page} is {width_pt:.0}x{height_pt:.0}pt, which cannot be previewed within \
+         {max_px}px per side"
+    )]
+    PageTooLarge {
+        page: usize,
+        width_pt: f32,
+        height_pt: f32,
+        max_px: u32,
+    },
     /// Rasterising a page produced no image.
     #[error("could not encode a preview for page {page}")]
     Preview { page: usize },
@@ -94,13 +105,61 @@ pub enum CompileError {
     World(#[from] WorldError),
 }
 
+/// A failed compile, with everything the compiler had to say about it.
+///
+/// One shape for every failure, carrying diagnostics uniformly. An earlier version
+/// put diagnostics only on the variants that obviously needed them, and warnings
+/// gathered before a late failure — a page-cap trip, an export error — were silently
+/// dropped. Keeping them in one place makes that impossible rather than merely fixed.
+#[derive(Debug, Error)]
+#[error("{kind}")]
+pub struct CompileError {
+    pub kind: CompileErrorKind,
+    /// Errors first, then warnings. For [`CompileErrorKind::Source`] this *is* the
+    /// result: the caller reads it and fixes their document.
+    diagnostics: Vec<Diagnostic>,
+}
+
 impl CompileError {
-    /// The diagnostics to hand back, whatever the failure was.
-    pub fn diagnostics(&self) -> Vec<Diagnostic> {
-        match self {
-            Self::Source { diagnostics } | Self::Export { diagnostics } => diagnostics.clone(),
-            other => vec![Diagnostic::bare(Severity::Error, other.to_string())],
+    fn new(kind: impl Into<CompileErrorKind>) -> Self {
+        Self {
+            kind: kind.into(),
+            diagnostics: Vec::new(),
         }
+    }
+
+    fn with(kind: impl Into<CompileErrorKind>, diagnostics: Vec<Diagnostic>) -> Self {
+        Self {
+            kind: kind.into(),
+            diagnostics,
+        }
+    }
+
+    /// Append warnings gathered before the failure.
+    fn extend(mut self, warnings: Vec<Diagnostic>) -> Self {
+        self.diagnostics.extend(warnings);
+        self
+    }
+
+    /// Everything to report: the compiler's own diagnostics, or a synthesised one
+    /// describing the failure when the compiler had nothing to say.
+    pub fn diagnostics(&self) -> Vec<Diagnostic> {
+        if self
+            .diagnostics
+            .iter()
+            .any(|d| d.severity == Severity::Error)
+        {
+            return self.diagnostics.clone();
+        }
+        let mut all = vec![Diagnostic::bare(Severity::Error, self.kind.to_string())];
+        all.extend(self.diagnostics.iter().cloned());
+        all
+    }
+}
+
+impl From<WorldError> for CompileError {
+    fn from(err: WorldError) -> Self {
+        Self::new(CompileErrorKind::World(err))
     }
 }
 
@@ -122,24 +181,41 @@ pub fn compile(
 
 fn compile_in(world: &BundleWorld, opts: &CompileOptions) -> Result<CompileOutput, CompileError> {
     let Warned { output, warnings } = typst::compile::<PagedDocument>(world);
-    let mut diagnostics = diagnostics::collect(world, &warnings);
+    let warnings = diagnostics::collect(world, &warnings);
 
     let document = match output {
         Ok(doc) => doc,
         Err(errors) => {
             // Errors first: whoever reads this wants the failure, not the warnings.
-            let mut all = diagnostics::collect(world, &errors);
-            all.append(&mut diagnostics);
-            return Err(CompileError::Source { diagnostics: all });
+            let errors = diagnostics::collect(world, &errors);
+            return Err(CompileError::with(CompileErrorKind::Source, errors).extend(warnings));
         }
     };
 
+    // Everything past here can still fail, and the warnings gathered above have to
+    // survive that: `.extend(warnings)` on the single error path is what guarantees it.
+    export(&document, world, opts)
+        .map_err(|err| err.extend(warnings.clone()))
+        .map(|(pdf, pages, previews)| CompileOutput {
+            pdf,
+            pages,
+            previews,
+            diagnostics: warnings,
+        })
+}
+
+/// Everything after a successful layout: cap, PDF, previews.
+fn export(
+    document: &PagedDocument,
+    world: &BundleWorld,
+    opts: &CompileOptions,
+) -> Result<(Vec<u8>, usize, Vec<Preview>), CompileError> {
     let pages = document.pages().len();
     if pages > opts.max_pages {
-        return Err(CompileError::TooManyPages {
+        return Err(CompileError::new(CompileErrorKind::TooManyPages {
             pages,
             limit: opts.max_pages,
-        });
+        }));
     }
 
     // No timestamp, ever: it is the only nondeterministic field in the output, and
@@ -151,18 +227,15 @@ fn compile_in(world: &BundleWorld, opts: &CompileOptions) -> Result<CompileOutpu
         ..Default::default()
     };
 
-    let pdf = typst_pdf::pdf(&document, &pdf_options).map_err(|errors| CompileError::Export {
-        diagnostics: diagnostics::collect(world, &errors),
+    let pdf = typst_pdf::pdf(document, &pdf_options).map_err(|errors| {
+        CompileError::with(
+            CompileErrorKind::Export,
+            diagnostics::collect(world, &errors),
+        )
     })?;
 
-    let previews = render_previews(&document, opts)?;
-
-    Ok(CompileOutput {
-        pdf,
-        pages,
-        previews,
-        diagnostics,
-    })
+    let previews = render_previews(document, opts)?;
+    Ok((pdf, pages, previews))
 }
 
 fn render_previews(
@@ -173,24 +246,43 @@ fn render_previews(
     let mut previews = Vec::with_capacity(opts.preview_pages.len());
 
     for &number in &opts.preview_pages {
+        let no_such_page = || {
+            CompileError::new(CompileErrorKind::NoSuchPage {
+                page: number,
+                pages,
+            })
+        };
         let page = document
             .pages()
-            .get(number.checked_sub(1).ok_or(CompileError::NoSuchPage {
-                page: number,
-                pages,
-            })?)
-            .ok_or(CompileError::NoSuchPage {
-                page: number,
-                pages,
-            })?;
+            .get(number.checked_sub(1).ok_or_else(no_such_page)?)
+            .ok_or_else(no_such_page)?;
 
         let size = page.frame.size();
-        let scale = clamp_scale(
-            opts.preview_scale,
-            size.x.to_pt() as f32,
-            size.y.to_pt() as f32,
-            opts.preview_max_px,
-        );
+        let (width_pt, height_pt) = (size.x.to_pt() as f32, size.y.to_pt() as f32);
+        let scale = clamp_scale(opts.preview_scale, width_pt, height_pt, opts.preview_max_px);
+
+        // Predict what typst-render will allocate and refuse it here if it is out of
+        // budget. `typst_render::render` ends in `Pixmap::new(w, h).unwrap()`, so a
+        // page big enough to saturate the `as u32` cast is a panic — and with
+        // `panic = "abort"` in release that is the whole worker. Clamping the scale
+        // should already prevent it; this is the check that makes it true rather than
+        // likely.
+        let (px_w, px_h) = predicted_pixels(width_pt, height_pt, scale).ok_or_else(|| {
+            CompileError::new(CompileErrorKind::PageTooLarge {
+                page: number,
+                width_pt,
+                height_pt,
+                max_px: opts.preview_max_px,
+            })
+        })?;
+        if px_w > opts.preview_max_px || px_h > opts.preview_max_px {
+            return Err(CompileError::new(CompileErrorKind::PageTooLarge {
+                page: number,
+                width_pt,
+                height_pt,
+                max_px: opts.preview_max_px,
+            }));
+        }
 
         let pixmap = typst_render::render(
             page,
@@ -202,7 +294,7 @@ fn render_previews(
 
         let png = pixmap
             .encode_png()
-            .map_err(|_| CompileError::Preview { page: number })?;
+            .map_err(|_| CompileError::new(CompileErrorKind::Preview { page: number }))?;
         previews.push(Preview {
             page: number,
             width: pixmap.width(),
@@ -216,13 +308,47 @@ fn render_previews(
 
 /// Shrink `requested` until neither edge exceeds `max_px`.
 ///
-/// Without this a `#set page(width: 10m)` document asks for a pixmap of billions of
-/// pixels and the allocation, not the caller, decides what happens next.
+/// Without this a document that sets an enormous page asks for a pixmap of billions
+/// of pixels, and the allocator — not the caller — decides what happens next.
+///
+/// The result is never raised back above the computed ceiling. An earlier version
+/// ended in `.max(0.01)`, which silently discarded the cap for any page longer than
+/// `max_px / 0.01` points: at the 2000px default, a 400000pt page still rendered at
+/// 4000x4000. Sanitising the *input* is a separate step from bounding the *output*,
+/// and doing both with one `max` conflated them.
 fn clamp_scale(requested: f32, width_pt: f32, height_pt: f32, max_px: u32) -> f32 {
-    let requested = requested.max(0.01);
-    let longest = width_pt.max(height_pt).max(1.0);
-    let allowed = max_px as f32 / longest;
-    requested.min(allowed).max(0.01)
+    // Sanitise first: a non-finite or non-positive request means "use the default".
+    let requested = if requested.is_finite() && requested > 0.0 {
+        requested
+    } else {
+        1.0
+    };
+
+    let longest = width_pt.max(height_pt);
+    if !longest.is_finite() || longest <= 0.0 {
+        // A degenerate page cannot overflow anything; typst-render floors at 1px.
+        return requested;
+    }
+
+    // Then bound, and never undo it.
+    (max_px as f32 / longest).min(requested)
+}
+
+/// The pixmap dimensions `typst_render::render` will allocate, or `None` if they are
+/// not representable.
+///
+/// Mirrors typst-render 0.15.1 exactly — `(pixel_per_pt * size).round().max(1.0) as u32`
+/// — because the point is to predict its behaviour, not to approximate it. The `as u32`
+/// cast there saturates, so a value beyond `u32::MAX` reaches `Pixmap::new` and panics;
+/// checking finiteness and range here is what turns that into a diagnostic.
+fn predicted_pixels(width_pt: f32, height_pt: f32, scale: f32) -> Option<(u32, u32)> {
+    let axis = |pt: f32| -> Option<u32> {
+        let px = (scale * pt).round().max(1.0);
+        // `as u32` saturates rather than wrapping, so an out-of-range float would
+        // silently become u32::MAX. Reject it instead.
+        (px.is_finite() && px <= u32::MAX as f32).then_some(px as u32)
+    };
+    Some((axis(width_pt)?, axis(height_pt)?))
 }
 
 #[cfg(test)]
@@ -313,7 +439,7 @@ mod tests {
         )
         .expect_err("too long");
         assert!(
-            matches!(err, CompileError::TooManyPages { limit: 2, .. }),
+            matches!(err.kind, CompileErrorKind::TooManyPages { limit: 2, .. }),
             "{err:?}"
         );
     }
@@ -331,17 +457,27 @@ mod tests {
     }
 
     #[test]
-    fn warnings_survive_a_successful_compile() {
-        // An unused `#let` binding is a warning, not an error.
+    fn a_missing_font_is_reported_as_a_warning() {
+        // The most valuable warning this service can surface: Typst substitutes a
+        // missing family silently, so without this the document simply comes out
+        // looking wrong with no indication why.
         let out = compile(
-            &bundle("#let unused = 1\n= Fine"),
+            &bundle("#set text(font: \"NoSuchFontFamily\")\n= Fine"),
             fonts(),
             &CompileOptions {
                 preview_pages: vec![],
                 ..Default::default()
             },
+        )
+        .expect("a missing font is not fatal");
+
+        assert!(
+            out.diagnostics
+                .iter()
+                .any(|d| d.severity == Severity::Warning && d.message.contains("font")),
+            "expected a font warning, got {:?}",
+            out.diagnostics
         );
-        assert!(out.is_ok());
     }
 
     #[test]
@@ -354,6 +490,99 @@ mod tests {
     }
 
     #[test]
+    fn the_pixel_budget_holds_for_absurdly_large_pages() {
+        // Regression: a trailing `.max(0.01)` used to undo the clamp for any page
+        // longer than max_px/0.01 pt, so a 400000pt page rendered at 4000x4000 against
+        // a 2000px cap. The A4 case above passes either way, which is why the bug
+        // survived — these are the sizes that actually exercise the ceiling.
+        for longest in [200_000.0, 400_000.0, 2_000_000.0, 1e12, f32::MAX] {
+            let scale = clamp_scale(1.0, longest, longest, 2000);
+            let (w, h) = predicted_pixels(longest, longest, scale)
+                .unwrap_or_else(|| panic!("{longest}pt produced unrepresentable pixels"));
+            assert!(
+                w <= 2000 && h <= 2000,
+                "{longest}pt rendered {w}x{h}px, over the 2000px cap (scale {scale})"
+            );
+        }
+    }
+
+    #[test]
+    fn predicted_pixels_matches_typst_render_and_rejects_the_unrepresentable() {
+        // Mirrors typst-render's own arithmetic; if that ever changes, this is the test
+        // that should fail rather than a panic in production.
+        assert_eq!(predicted_pixels(595.0, 842.0, 1.0), Some((595, 842)));
+        assert_eq!(predicted_pixels(100.0, 100.0, 2.0), Some((200, 200)));
+        // typst-render floors at one pixel, so a vanishing scale is not an error.
+        assert_eq!(predicted_pixels(100.0, 100.0, 1e-9), Some((1, 1)));
+        // Beyond u32 the `as` cast would saturate and Pixmap::new would panic.
+        assert_eq!(predicted_pixels(f32::MAX, f32::MAX, 1.0), None);
+        assert_eq!(predicted_pixels(1e30, 1e30, 1.0), None);
+    }
+
+    #[test]
+    fn absurd_page_sizes_preview_within_budget_instead_of_aborting() {
+        // Regression: these used to reach `Pixmap::new(..).unwrap()` inside typst-render
+        // and abort the process — which `panic = "abort"` makes fatal to the worker.
+        // With the clamp fixed they render correctly, just very small.
+        let opts = CompileOptions {
+            preview_pages: vec![1],
+            preview_max_px: 2000,
+            ..Default::default()
+        };
+        for size in ["1000000pt", "1000000000000pt"] {
+            let source = format!("#set page(width: {size}, height: {size})\n= Big");
+            let out = compile(&bundle(&source), fonts(), &opts)
+                .unwrap_or_else(|e| panic!("{size} failed: {e}"));
+            let preview = out.previews.first().expect("a preview");
+            assert!(
+                preview.width <= 2000 && preview.height <= 2000,
+                "{size} rendered {}x{}px, over the cap",
+                preview.width,
+                preview.height
+            );
+        }
+    }
+
+    #[test]
+    fn a_degenerate_scale_request_falls_back_rather_than_exploding() {
+        for requested in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+            let scale = clamp_scale(requested, 595.0, 842.0, 2000);
+            assert!(scale.is_finite() && scale > 0.0, "{requested} gave {scale}");
+            let (w, h) = predicted_pixels(595.0, 842.0, scale).expect("representable");
+            assert!(w <= 2000 && h <= 2000, "{requested} gave {w}x{h}");
+        }
+    }
+
+    #[test]
+    fn warnings_survive_a_late_failure() {
+        // Regression: warnings gathered during a successful layout were dropped when a
+        // later stage failed, so a page-cap trip reported the cap and silently lost
+        // everything the compiler had said.
+        let opts = CompileOptions {
+            max_pages: 1,
+            preview_pages: vec![],
+            ..Default::default()
+        };
+        // An unknown font family warns; the pagebreaks then trip the page cap.
+        let source = "#set text(font: \"NoSuchFontFamily\")\n#pagebreak()\n#pagebreak()";
+        let err = compile(&bundle(source), fonts(), &opts).expect_err("over the cap");
+        assert!(
+            matches!(err.kind, CompileErrorKind::TooManyPages { .. }),
+            "{err:?}"
+        );
+
+        let diagnostics = err.diagnostics();
+        assert!(
+            diagnostics.iter().any(|d| d.severity == Severity::Error),
+            "the failure itself must be reported: {diagnostics:?}"
+        );
+        assert!(
+            diagnostics.iter().any(|d| d.severity == Severity::Warning),
+            "warnings from before the failure must survive: {diagnostics:?}"
+        );
+    }
+
+    #[test]
     fn rejects_preview_of_a_page_that_does_not_exist() {
         let opts = CompileOptions {
             preview_pages: vec![7],
@@ -361,7 +590,7 @@ mod tests {
         };
         let err = compile(&bundle("= One page"), fonts(), &opts).expect_err("no page 7");
         assert!(
-            matches!(err, CompileError::NoSuchPage { page: 7, pages: 1 }),
+            matches!(err.kind, CompileErrorKind::NoSuchPage { page: 7, pages: 1 }),
             "{err:?}"
         );
     }

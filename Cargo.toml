@@ -41,6 +41,10 @@ base64 = "0.22"
 # --- per-compile address-space cap, imposed by the worker on itself ---
 rlimit = "0.10"
 
+# --- template manifests + data validation ---
+toml = "1.1"
+jsonschema = { version = "0.49", default-features = false }
+
 # --- errors ---
 anyhow = "1.0"
 thiserror = "2.0"

@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Hanso document",
+  "description": "Metadata for a Hanso-branded document. Everything except `title` is optional; omitted fields use the template's own branded defaults.",
+  "type": "object",
+  "required": ["title"],
+  "additionalProperties": false,
+  "properties": {
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "description": "Document title, shown on the cover."
+    },
+    "author": {
+      "type": "string",
+      "maxLength": 120,
+      "description": "Author name, shown under the title."
+    },
+    "date": {
+      "type": "string",
+      "format": "date",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+      "description": "Document date as YYYY-MM-DD. Defaults to today."
+    },
+    "theme": {
+      "enum": ["light", "dark"],
+      "default": "light",
+      "description": "Light is the beige brand ground; dark is the navy palette."
+    },
+    "footer_style": {
+      "enum": ["full", "simple"],
+      "default": "full",
+      "description": "`full` is the three-column address/contact/bank block for external correspondence. `simple` is one line for internal documents."
+    },
+    "org": { "type": "string", "maxLength": 120 },
+    "address": {
+      "type": "array",
+      "items": { "type": "string", "maxLength": 120 },
+      "maxItems": 6,
+      "description": "Address lines for the footer."
+    },
+    "phone": { "type": "string", "maxLength": 60 },
+    "email": { "type": "string", "maxLength": 120 },
+    "web": { "type": "string", "maxLength": 120 },
+    "social": { "type": "string", "maxLength": 60 },
+    "bank": {
+      "type": "array",
+      "items": { "type": "string", "maxLength": 120 },
+      "maxItems": 6,
+      "description": "Bank detail lines. Only shown when footer_style is `full`."
+    },
+    "support": {
+      "type": "string",
+      "maxLength": 120,
+      "description": "Support address shown in the simple footer."
+    },
+    "confidentiality": {
+      "type": "string",
+      "maxLength": 120,
+      "description": "Classification note in the simple footer, e.g. \"Internal use only\"."
+    }
+  }
+}

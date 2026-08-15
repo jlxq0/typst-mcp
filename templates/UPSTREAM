@@ -1,0 +1,13 @@
+# Canonical source for the vendored templates.
+#
+# Templates live in the OfficeMaster repo alongside each brand's brief and its
+# Word/PowerPoint masters. They are vendored here (rather than cloned at image
+# build) so the build needs no credentials, images stay hermetic, and drift shows
+# up as a reviewable diff instead of two builds of the same tag differing.
+#
+# To update: edit the canonical copy, then re-run scripts/sync-templates.sh.
+
+repo = git@forge.oddie.app:thehansogroup/OfficeMaster.git
+commit = 12cf425bf0f6
+path = typst/
+synced = 2026-08-15

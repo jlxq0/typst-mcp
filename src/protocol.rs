@@ -131,10 +131,24 @@ pub enum JobResult {
 }
 
 /// Write a length-prefixed JSON frame.
+///
+/// Enforces the same ceiling as [`read_frame`]. An asymmetric limit is worse than no
+/// limit: the writer would succeed, the reader would refuse what it just received, and
+/// the failure would surface far from its cause with the payload already spent.
 pub fn write_frame<W: Write, T: Serialize>(mut out: W, value: &T) -> io::Result<()> {
     let payload = serde_json::to_vec(value)?;
     let len = u32::try_from(payload.len())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "frame too large"))?;
+        .ok()
+        .filter(|n| *n <= MAX_FRAME_BYTES)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "frame of {} bytes exceeds the {MAX_FRAME_BYTES} byte limit",
+                    payload.len()
+                ),
+            )
+        })?;
     out.write_all(&len.to_le_bytes())?;
     out.write_all(&payload)?;
     out.flush()
@@ -213,6 +227,21 @@ mod tests {
         write_frame(&mut buf, &sample_job()).expect("write");
         buf.truncate(buf.len() / 2);
         assert!(read_frame::<_, Job>(buf.as_slice()).is_err());
+    }
+
+    #[test]
+    fn oversized_frames_are_refused_on_write_too() {
+        // The limit has to be symmetric, or the worker spends a whole compile producing
+        // a frame the parent will then reject.
+        let huge = JobResult::Ok {
+            pdf_base64: "A".repeat(MAX_FRAME_BYTES as usize + 1),
+            pages: 1,
+            previews: vec![],
+            diagnostics: vec![],
+        };
+        let err = write_frame(Vec::new(), &huge).expect_err("must refuse");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("exceeds"), "{err}");
     }
 
     #[test]

@@ -1,0 +1,79 @@
+# Hanso corporate document.
+#
+# Vendored from OfficeMaster; see templates/UPSTREAM for the source commit. Edit the
+# canonical copy there and re-run scripts/sync-templates.sh — CI fails on drift.
+
+name = "hanso"
+kind = "wrapper"
+version = "1.0.0"
+description = """
+Hanso corporate document — retro stripe cover sweeps, Figtree typography, \
+roman/alpha heading scheme, standfirsts, and the three-column company footer. \
+Mirrors the corporate Word master. Light and dark modes."""
+entrypoint = "hanso.typ"
+wrapper_fn = "hanso-doc"
+
+# Every argument below is optional: omit one and `hanso-doc`'s own branded default
+# applies. That is what lets a caller pass three fields and still get the full
+# letterhead, bank block and footer.
+
+[args.title]
+arg = "title"
+type = "str"
+
+[args.author]
+arg = "author"
+type = "str"
+
+[args.date]
+arg = "date"
+type = "date"
+
+# "light" | "dark". The caller picks a key; this map decides which binding it
+# expands to, so caller input never reaches code position.
+[args.theme]
+arg = "theme"
+type = "ident"
+map = { light = "light-theme", dark = "dark-theme" }
+
+# "full" is the three-column address/contact/bank block for external correspondence;
+# "simple" collapses to a single line for internal documents.
+[args.footer_style]
+arg = "footer-style"
+type = "str"
+
+[args.org]
+arg = "org"
+type = "str"
+
+[args.address]
+arg = "address"
+type = "strings"
+
+[args.phone]
+arg = "phone"
+type = "str"
+
+[args.email]
+arg = "email"
+type = "str"
+
+[args.web]
+arg = "web"
+type = "str"
+
+[args.social]
+arg = "social"
+type = "str"
+
+[args.bank]
+arg = "bank"
+type = "strings"
+
+[args.support]
+arg = "support"
+type = "str"
+
+[args.confidentiality]
+arg = "confidentiality"
+type = "str"
