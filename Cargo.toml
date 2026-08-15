@@ -23,9 +23,23 @@ typst-kit = { version = "0.15.1", default-features = false, features = [
 comemo = "0.5"
 tiny-skia = "0.12"
 
+# --- async runtime, for the parent side of the worker protocol ---
+tokio = { version = "1.41", features = [
+    "macros",
+    "rt-multi-thread",
+    "process",
+    "io-util",
+    "sync",
+    "time",
+] }
+
 # --- serde ---
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+base64 = "0.22"
+
+# --- per-compile address-space cap, imposed by the worker on itself ---
+rlimit = "0.10"
 
 # --- errors ---
 anyhow = "1.0"
@@ -33,6 +47,7 @@ thiserror = "2.0"
 
 [dev-dependencies]
 tempfile = "3"
+tokio = { version = "1.41", features = ["macros", "rt-multi-thread", "test-util", "time"] }
 
 [profile.release]
 panic = "abort"
