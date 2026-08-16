@@ -210,6 +210,20 @@ pub struct Template {
     example_body: Option<String>,
 }
 
+/// The pieces of a template, however they arrived.
+///
+/// A baked template is read from a directory; an uploaded one arrives as text over the
+/// API. Both land here, so validation happens once and an uploaded template is held to
+/// exactly the same rules as one that shipped in the image.
+#[derive(Debug, Default)]
+pub struct TemplateParts {
+    pub manifest_toml: String,
+    pub files: Vec<BundleFile>,
+    pub schema_json: Option<String>,
+    pub fixture_json: Option<String>,
+    pub fixture_body: Option<String>,
+}
+
 impl Template {
     /// Load a template from a directory.
     pub fn load(dir: &Path) -> Result<Self, TemplateError> {
@@ -217,12 +231,30 @@ impl Template {
         if !manifest_path.is_file() {
             return Err(TemplateError::NoManifest(dir.to_owned()));
         }
-        let manifest: Manifest = toml::from_str(&read(&manifest_path)?).map_err(|source| {
-            TemplateError::BadManifest {
-                path: manifest_path,
+        let manifest_toml = read(&manifest_path)?;
+        // The name is not known until the manifest parses, and `collect_files` wants it
+        // for its error messages; a placeholder keeps that from being circular.
+        let files = collect_files(dir, "<loading>")?;
+
+        Self::assemble_from(TemplateParts {
+            manifest_toml,
+            files,
+            schema_json: read_optional(&dir.join("schema.json"))?,
+            fixture_json: read_optional(&dir.join("fixture.json"))?,
+            fixture_body: read_optional(&dir.join("fixture.body.typ"))?,
+        })
+    }
+
+    /// Build a template from its parts, validating everything.
+    ///
+    /// Every check here runs at *upload* time as well as at deploy time, so a caller
+    /// finds out their template is broken when they send it rather than at first use.
+    pub fn assemble_from(parts: TemplateParts) -> Result<Self, TemplateError> {
+        let manifest: Manifest =
+            toml::from_str(&parts.manifest_toml).map_err(|source| TemplateError::BadManifest {
+                path: PathBuf::from("template.toml"),
                 source,
-            }
-        })?;
+            })?;
 
         if manifest.kind == TemplateKind::Wrapper {
             match manifest.wrapper_fn.as_deref() {
@@ -231,6 +263,8 @@ impl Template {
                         name: manifest.name.clone(),
                     });
                 }
+                // The wrapper function name is emitted into generated source in code
+                // position, so it is the one string here that must be an identifier.
                 Some(f) if !is_ident(f) => {
                     return Err(TemplateError::BadWrapperFn {
                         name: manifest.name.clone(),
@@ -241,7 +275,19 @@ impl Template {
             }
         }
 
-        let files = collect_files(dir, &manifest.name)?;
+        let mut files = parts.files;
+        for file in &files {
+            if file.path.starts_with(RESERVED_PREFIX) {
+                return Err(TemplateError::ReservedName(file.path.clone()));
+            }
+            normalise_path(&file.path).map_err(|source| TemplateError::BadPath {
+                name: manifest.name.clone(),
+                path: file.path.clone(),
+                source,
+            })?;
+        }
+        files.sort_by(|a, b| a.path.cmp(&b.path));
+
         if !files.iter().any(|f| f.path == manifest.entrypoint) {
             return Err(TemplateError::MissingEntrypoint {
                 name: manifest.name.clone(),
@@ -249,12 +295,12 @@ impl Template {
             });
         }
 
-        // Validate the schema at load time rather than on first use: a broken template
-        // should fail when it is deployed, not when a caller happens to hit it.
-        let schema = read_json(&dir.join("schema.json"))?;
+        // Validated here rather than on first use: a broken schema should fail when the
+        // template arrives, not when a caller happens to hit it.
+        let schema = parse_json(parts.schema_json.as_deref(), "schema.json")?;
         if let Some(schema) = &schema {
             jsonschema::validator_for(schema).map_err(|e| TemplateError::BadSchema {
-                path: dir.join("schema.json"),
+                path: PathBuf::from("schema.json"),
                 message: e.to_string(),
             })?;
         }
@@ -263,9 +309,14 @@ impl Template {
             manifest,
             files,
             schema,
-            example: read_json(&dir.join("fixture.json"))?,
-            example_body: read_optional(&dir.join("fixture.body.typ"))?,
+            example: parse_json(parts.fixture_json.as_deref(), "fixture.json")?,
+            example_body: parts.fixture_body,
         })
+    }
+
+    /// The template's own files, for storing an uploaded copy.
+    pub fn files(&self) -> &[BundleFile] {
+        &self.files
     }
 
     pub fn name(&self) -> &str {
@@ -650,14 +701,18 @@ fn read_optional(path: &Path) -> Result<Option<String>, TemplateError> {
     }
 }
 
-fn read_json(path: &Path) -> Result<Option<serde_json::Value>, TemplateError> {
-    let Some(text) = read_optional(path)? else {
+/// Parse optional JSON text the same way a file on disk would be parsed.
+///
+/// Uploaded templates arrive as strings; baked ones are read into strings first.
+/// One parser means an upload cannot sneak past a check that only ran on disk.
+fn parse_json(text: Option<&str>, name: &str) -> Result<Option<serde_json::Value>, TemplateError> {
+    let Some(text) = text else {
         return Ok(None);
     };
-    serde_json::from_str(&text)
+    serde_json::from_str(text)
         .map(Some)
         .map_err(|e| TemplateError::BadSchema {
-            path: path.to_owned(),
+            path: PathBuf::from(name),
             message: e.to_string(),
         })
 }
