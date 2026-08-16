@@ -556,6 +556,18 @@ async fn oauth_metadata_is_served_when_oidc_is_configured() {
     );
     assert_eq!(body["bearer_methods_supported"][0], "header");
     assert_eq!(body["scopes_supported"][0], "render");
+    assert_eq!(
+        body["resource"],
+        format!("{}/mcp", server.base),
+        "RFC 9728 resource must be the /mcp endpoint, not the origin"
+    );
+
+    let inserted = server
+        .get("/.well-known/oauth-protected-resource/mcp", None)
+        .await;
+    assert_eq!(inserted.status(), 200);
+    let inserted_body: serde_json::Value = inserted.json().await.expect("json");
+    assert_eq!(inserted_body["resource"], format!("{}/mcp", server.base));
 }
 
 #[tokio::test]

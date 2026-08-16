@@ -54,6 +54,13 @@ pub fn router(state: AppState) -> axum::Router {
             "/.well-known/oauth-protected-resource",
             get(protected_resource_metadata),
         )
+        // RFC 9728 §3.1 path-inserted location for the `{origin}/mcp` resource.
+        // Strict clients follow WWW-Authenticate here; we also keep the bare
+        // well-known path for clients that probe the origin.
+        .route(
+            "/.well-known/oauth-protected-resource/mcp",
+            get(protected_resource_metadata),
+        )
         // Outside the bearer layer on purpose: this route accepts either a credential
         // or a signature, and does its own check as its first action.
         .route("/files/{tenant}/{job}/{name}", get(download))
@@ -139,7 +146,7 @@ async fn protected_resource_metadata(State(state): State<AppState>) -> Response 
     };
 
     Json(serde_json::json!({
-        "resource": state.config.public_url,
+        "resource": state.config.mcp_resource_url(),
         "authorization_servers": [oidc.issuer],
         "bearer_methods_supported": ["header"],
         "scopes_supported": [oidc.scope],

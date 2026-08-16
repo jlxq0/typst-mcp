@@ -341,7 +341,7 @@ async fn a_request_without_a_token_says_where_to_get_one() {
     // precisely what the MCP authorization spec requires here.
     assert!(challenge.contains("resource_metadata="), "{challenge}");
     assert!(
-        challenge.contains(".well-known/oauth-protected-resource"),
+        challenge.contains(".well-known/oauth-protected-resource/mcp"),
         "{challenge}"
     );
 }
@@ -472,7 +472,7 @@ async fn the_protected_resource_metadata_is_reachable_without_a_token() {
     let response = server
         .client
         .get(format!(
-            "{}/.well-known/oauth-protected-resource",
+            "{}/.well-known/oauth-protected-resource/mcp",
             server.base
         ))
         .send()
@@ -482,7 +482,22 @@ async fn the_protected_resource_metadata_is_reachable_without_a_token() {
     assert_eq!(response.status(), 200);
     let body: serde_json::Value = response.json().await.expect("json");
     assert_eq!(body["authorization_servers"][0], server.idp.issuer);
-    assert_eq!(body["resource"], server.base);
+    assert_eq!(body["resource"], format!("{}/mcp", server.base));
+
+    // Origin probe returns the same document — clients that skip path-insertion
+    // still see resource = {origin}/mcp.
+    let origin = server
+        .client
+        .get(format!(
+            "{}/.well-known/oauth-protected-resource",
+            server.base
+        ))
+        .send()
+        .await
+        .expect("request");
+    assert_eq!(origin.status(), 200);
+    let origin_body: serde_json::Value = origin.json().await.expect("json");
+    assert_eq!(origin_body["resource"], format!("{}/mcp", server.base));
 }
 
 #[tokio::test]

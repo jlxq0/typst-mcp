@@ -346,11 +346,16 @@ mod tests {
                 audience: "api://typst-mcp".into(),
                 scope: "render".into(),
             }),
-            "https://typst.example.com/.well-known/oauth-protected-resource",
+            "https://typst.example.com/.well-known/oauth-protected-resource/mcp",
         );
         let challenge = auth.challenge();
         assert!(challenge.starts_with("Bearer "), "{challenge}");
         assert!(challenge.contains("resource_metadata="), "{challenge}");
+        assert!(
+            challenge
+                .contains("https://typst.example.com/.well-known/oauth-protected-resource/mcp"),
+            "{challenge}"
+        );
         assert!(challenge.contains("scope=\"render\""), "{challenge}");
     }
 

@@ -171,9 +171,21 @@ impl Config {
         format!("{}/{}", self.public_url, path.trim_start_matches('/'))
     }
 
+    /// The canonical MCP resource identifier: `{origin}/mcp`.
+    ///
+    /// RFC 9728 §3.3 and the MCP authorization spec require `resource` to match the
+    /// URL the client actually connects to. claude.ai tolerates a bare origin;
+    /// stricter clients reject anything that is not the exact endpoint.
+    pub fn mcp_resource_url(&self) -> String {
+        self.url("mcp")
+    }
+
     /// Where the RFC 9728 protected-resource metadata lives.
+    ///
+    /// Path-inserted form for the `{origin}/mcp` resource
+    /// (`/.well-known/oauth-protected-resource/mcp`).
     pub fn metadata_url(&self) -> String {
-        self.url(".well-known/oauth-protected-resource")
+        self.url(".well-known/oauth-protected-resource/mcp")
     }
 }
 
@@ -434,9 +446,10 @@ mod tests {
             config.url("/files/x.pdf"),
             "https://typst.example.com/files/x.pdf"
         );
+        assert_eq!(config.mcp_resource_url(), "https://typst.example.com/mcp");
         assert_eq!(
             config.metadata_url(),
-            "https://typst.example.com/.well-known/oauth-protected-resource"
+            "https://typst.example.com/.well-known/oauth-protected-resource/mcp"
         );
     }
 
