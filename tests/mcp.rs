@@ -481,7 +481,7 @@ async fn the_protected_resource_metadata_is_reachable_without_a_token() {
 
     assert_eq!(response.status(), 200);
     let body: serde_json::Value = response.json().await.expect("json");
-    assert_eq!(body["authorization_servers"][0], server.idp.issuer);
+    assert_eq!(body["authorization_servers"][0], server.base);
     assert_eq!(body["resource"], format!("{}/mcp", server.base));
 
     // Origin probe returns the same document — clients that skip path-insertion

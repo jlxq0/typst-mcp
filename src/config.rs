@@ -76,6 +76,11 @@ pub struct Config {
 
     pub api_keys: ApiKeys,
     pub oidc: Option<OidcConfig>,
+    /// Entra public-client id used by the DCR shim and the authorize/token proxy.
+    /// Optional: health and PRM still work without it; /authorize returns 503.
+    pub client_id: Option<String>,
+    pub dcr_client_id: Option<String>,
+    pub oauth_redirect_uris: Vec<String>,
 
     /// The binary to spawn for compiles. `None` re-execs this process, which is
     /// correct in production but wrong inside a test harness, where `current_exe()`
@@ -120,6 +125,30 @@ impl Config {
             }),
             _ => None,
         };
+        let client_id = get("OIDC_CLIENT_ID")
+            .or_else(|| get("CLIENT_ID"))
+            .map(|v| v.trim().to_owned())
+            .filter(|v| !v.is_empty());
+        let dcr_client_id = get("DCR_CLIENT_ID")
+            .map(|v| v.trim().to_owned())
+            .filter(|v| !v.is_empty())
+            .or_else(|| client_id.clone());
+        let extras = match get("OAUTH_REDIRECT_URIS").filter(|v| !v.trim().is_empty()) {
+            Some(raw) => crate::oauth_redirect::parse_allowlist(&raw, "OAUTH_REDIRECT_URIS")
+                .map_err(|err| ConfigError::Invalid {
+                    name: "OAUTH_REDIRECT_URIS",
+                    value: err.to_string(),
+                    expected: "comma-separated redirect URIs",
+                })?,
+            None => Vec::new(),
+        };
+        let oauth_redirect_uris = crate::oauth_redirect::merge_allowlist(&extras).map_err(|err| {
+            ConfigError::Invalid {
+                name: "OAUTH_REDIRECT_URIS",
+                value: err.to_string(),
+                expected: "comma-separated redirect URIs",
+            }
+        })?;
 
         // Refusing to start beats starting open. A renderer with neither door
         // authenticated is an anonymous compute endpoint on the public internet.
@@ -143,6 +172,9 @@ impl Config {
 
             api_keys,
             oidc,
+            client_id,
+            dcr_client_id,
+            oauth_redirect_uris,
 
             worker_exe: get("WORKER_EXE")
                 .filter(|v| !v.trim().is_empty())
@@ -187,6 +219,24 @@ impl Config {
     pub fn metadata_url(&self) -> String {
         self.url(".well-known/oauth-protected-resource/mcp")
     }
+
+    pub fn callback_url(&self) -> String {
+        self.url("oauth/callback")
+    }
+
+    pub fn entra_authorize_url(&self) -> Option<String> {
+        self.oidc.as_ref().map(|oidc| entra_oauth_url(&oidc.issuer, "authorize"))
+    }
+
+    pub fn entra_token_url(&self) -> Option<String> {
+        self.oidc.as_ref().map(|oidc| entra_oauth_url(&oidc.issuer, "token"))
+    }
+}
+
+fn entra_oauth_url(issuer: &str, leaf: &str) -> String {
+    let issuer = issuer.trim_end_matches('/');
+    let base = issuer.strip_suffix("/v2.0").unwrap_or(issuer);
+    format!("{base}/oauth2/v2.0/{leaf}")
 }
 
 fn required(
@@ -458,5 +508,37 @@ mod tests {
         let config = load(&[("FONT_DIRS", "/a:/b:/c")]).expect("loads");
         assert_eq!(config.font_dirs.len(), 3);
         assert_eq!(config.font_dirs[2], PathBuf::from("/c"));
+    }
+
+    #[test]
+    fn entra_oauth_urls_come_from_the_issuer() {
+        let config = load(&[
+            ("OIDC_ISSUER", "https://login.microsoftonline.com/abc/v2.0"),
+            ("OIDC_AUDIENCE", "api://typst-mcp"),
+            ("OIDC_CLIENT_ID", "entra-public-client"),
+        ])
+        .expect("loads");
+        assert_eq!(config.client_id.as_deref(), Some("entra-public-client"));
+        assert_eq!(config.dcr_client_id.as_deref(), Some("entra-public-client"));
+        assert_eq!(
+            config.entra_authorize_url().as_deref(),
+            Some("https://login.microsoftonline.com/abc/oauth2/v2.0/authorize")
+        );
+        assert_eq!(
+            config.entra_token_url().as_deref(),
+            Some("https://login.microsoftonline.com/abc/oauth2/v2.0/token")
+        );
+        assert!(
+            config
+                .oauth_redirect_uris
+                .iter()
+                .any(|uri| uri == "cursor://anysphere.cursor-mcp/oauth/callback")
+        );
+        assert!(
+            config
+                .oauth_redirect_uris
+                .iter()
+                .any(|uri| uri == "claude://claude.ai/oauth/callback")
+        );
     }
 }

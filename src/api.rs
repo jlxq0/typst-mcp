@@ -12,6 +12,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::auth::{ApiKeyAuth, AuthError, Authenticated, OidcAuth, unauthorized};
 use crate::config::Config;
+use crate::oauth_metadata::{
+    authorization_server_metadata, protected_resource_metadata, register,
+};
+use crate::oauth_proxy::{self, OAuthProxyState};
 use crate::diagnostics::Diagnostic;
 use crate::principal::TenantId;
 use crate::render::{DOCUMENT_NAME, RenderError, RenderRequest, RenderService};
@@ -26,6 +30,7 @@ pub struct AppState {
     pub render: Arc<RenderService>,
     pub api_key_auth: ApiKeyAuth,
     pub oidc_auth: OidcAuth,
+    pub oauth_proxy: OAuthProxyState,
 }
 
 /// Build the router.
@@ -61,6 +66,24 @@ pub fn router(state: AppState) -> axum::Router {
             "/.well-known/oauth-protected-resource/mcp",
             get(protected_resource_metadata),
         )
+        // RFC 8414 + RFC 7591. Public: Claude Connect probes these unauthenticated.
+        // A 401 here is exactly "Automatic client registration isn't supported".
+        .route(
+            "/.well-known/oauth-authorization-server",
+            get(authorization_server_metadata),
+        )
+        .route(
+            "/.well-known/oauth-authorization-server/mcp",
+            get(authorization_server_metadata),
+        )
+        .route(
+            "/.well-known/openid-configuration",
+            get(authorization_server_metadata),
+        )
+        .route("/register", post(register))
+        .route("/authorize", get(oauth_proxy::authorize))
+        .route("/oauth/callback", get(oauth_proxy::callback))
+        .route("/token", post(oauth_proxy::token))
         // Outside the bearer layer on purpose: this route accepts either a credential
         // or a signature, and does its own check as its first action.
         .route("/files/{tenant}/{job}/{name}", get(download))
@@ -126,32 +149,6 @@ async fn health(State(state): State<AppState>) -> Json<Health> {
         store_bytes: state.render.store().used_bytes(),
         timestamp: now(),
     })
-}
-
-/// RFC 9728 protected-resource metadata.
-///
-/// The one thing the MCP authorization spec says a server **must** implement: it is how
-/// a client discovers which authorization server to talk to. Public by necessity — a
-/// client reads it precisely because it does not yet have a credential.
-async fn protected_resource_metadata(State(state): State<AppState>) -> Response {
-    let Some(oidc) = state.oidc_auth.config() else {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({
-                "error": "not_configured",
-                "message": "this server does not accept OIDC credentials",
-            })),
-        )
-            .into_response();
-    };
-
-    Json(serde_json::json!({
-        "resource": state.config.mcp_resource_url(),
-        "authorization_servers": [oidc.issuer],
-        "bearer_methods_supported": ["header"],
-        "scopes_supported": [oidc.scope],
-    }))
-    .into_response()
 }
 
 // -- rendering ------------------------------------------------------------------

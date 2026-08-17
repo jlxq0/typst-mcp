@@ -43,6 +43,7 @@ impl Server {
         let state = AppState {
             api_key_auth: ApiKeyAuth::new(config.api_keys.clone()),
             oidc_auth: OidcAuth::new(config.oidc.clone(), &config.metadata_url()),
+            oauth_proxy: crate::oauth_proxy::OAuthProxyState::new(),
             render,
             config,
         };

@@ -552,7 +552,7 @@ async fn oauth_metadata_is_served_when_oidc_is_configured() {
     let body: serde_json::Value = response.json().await.expect("json");
     assert_eq!(
         body["authorization_servers"][0],
-        "https://login.microsoftonline.com/abc/v2.0"
+        server.base
     );
     assert_eq!(body["bearer_methods_supported"][0], "header");
     assert_eq!(body["scopes_supported"][0], "render");
@@ -637,4 +637,54 @@ async fn a_request_with_neither_template_nor_source_says_so() {
             .contains("template"),
         "{body}"
     );
+}
+
+#[tokio::test]
+async fn authorization_server_metadata_and_dcr_are_unauthenticated() {
+    let server = TestServer::start_with(&[
+        ("OIDC_ISSUER", "https://login.microsoftonline.com/abc/v2.0"),
+        ("OIDC_AUDIENCE", "api://typst-mcp"),
+        ("OIDC_CLIENT_ID", "entra-public-client"),
+    ])
+    .await;
+
+    let as_meta = server
+        .get("/.well-known/oauth-authorization-server", None)
+        .await;
+    assert_eq!(as_meta.status(), 200, "AS metadata must not 401");
+    let body: serde_json::Value = as_meta.json().await.expect("json");
+    assert_eq!(body["issuer"], server.base);
+    assert_eq!(
+        body["registration_endpoint"],
+        format!("{}/register", server.base)
+    );
+    assert_eq!(
+        body["authorization_endpoint"],
+        format!("{}/authorize", server.base)
+    );
+
+    let register = server
+        .post_json(
+            "/register",
+            None,
+            serde_json::json!({
+                "client_name": "spec-probe-public",
+                "redirect_uris": ["cursor://anysphere.cursor-mcp/oauth/callback"],
+                "token_endpoint_auth_method": "none",
+            }),
+        )
+        .await;
+    assert_eq!(register.status(), 201);
+    let created: serde_json::Value = register.json().await.expect("json");
+    assert_eq!(created["client_id"], "entra-public-client");
+    assert!(created.get("client_secret").is_none());
+
+    let rejected = server
+        .post_json(
+            "/register",
+            None,
+            serde_json::json!({"redirect_uris": ["https://attacker.example/cb"]}),
+        )
+        .await;
+    assert_eq!(rejected.status(), 400);
 }
