@@ -149,6 +149,20 @@ impl TestServer {
     }
 
     async fn start_with(overrides: &[(&str, &str)]) -> Self {
+        Self::start_inner(overrides, None).await
+    }
+
+    /// Start with a `PUBLIC_URL` that is *not* the loopback address bound.
+    ///
+    /// Everything derived from the public URL — the RFC 9728 resource, and the
+    /// `Host` values the MCP endpoint will answer to — then differs from where the
+    /// test actually connects, which is the arrangement a real deployment is in
+    /// and the only way to test it.
+    async fn start_with_public_url(public_url: &str) -> Self {
+        Self::start_inner(&[], Some(public_url)).await
+    }
+
+    async fn start_inner(overrides: &[(&str, &str)], public_url: Option<&str>) -> Self {
         let idp = MockIdp::start().await;
         let data = tempfile::tempdir().expect("tempdir");
 
@@ -185,7 +199,7 @@ impl TestServer {
         let base = format!("http://{addr}");
 
         let mut config = config;
-        config.public_url = base.clone();
+        config.public_url = public_url.map_or_else(|| base.clone(), str::to_owned);
         let app = Server::build(config).expect("build").router();
         tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
@@ -732,4 +746,63 @@ async fn a_client_on_an_older_protocol_revision_still_gets_the_tools() {
         "an older client must see the tools: {}",
         &body[..body.len().min(300)]
     );
+}
+
+/// A request arriving with the deployment's public `Host` must reach the tools.
+///
+/// rmcp validates `Host` against an allowlist to stop DNS rebinding, and its
+/// default is loopback only. On a public deployment that turns every call into a
+/// 403 — *after* the bearer token has been accepted, so the client sees OAuth
+/// succeed and then "failed to load MCP server / 0 tools", which looks like an
+/// auth bug and is not one. Every other test here connects to 127.0.0.1, which
+/// is on the default list, so this is the only shape that catches it.
+#[tokio::test]
+async fn a_request_carrying_the_public_host_is_not_refused() {
+    let server = TestServer::start_with_public_url("https://typst-mcp.example.test").await;
+    let token = server.idp.token("alice");
+
+    // The server's PUBLIC_URL is its loopback base, so borrow a host that is
+    // definitely not loopback and assert the guard is still doing its job...
+    let rebinding = server
+        .client
+        .post(format!("{}/mcp", server.base))
+        .header("accept", "application/json, text/event-stream")
+        .header("host", "attacker.example")
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                       "clientInfo": {"name": "probe", "version": "1"}}
+        }))
+        .send()
+        .await
+        .expect("request");
+    assert_eq!(
+        rebinding.status(),
+        403,
+        "an unknown Host must still be refused"
+    );
+
+    // ...while the host this deployment publishes is accepted. `PUBLIC_URL` is
+    // what clients are told to connect to, so it is the Host they will send.
+    let allowed = server
+        .client
+        .post(format!("{}/mcp", server.base))
+        .header("accept", "application/json, text/event-stream")
+        .header("host", "typst-mcp.example.test")
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                       "clientInfo": {"name": "probe", "version": "1"}}
+        }))
+        .send()
+        .await
+        .expect("request");
+    assert_ne!(
+        allowed.status(),
+        403,
+        "the deployment's own public host must not be treated as a rebinding attempt"
+    );
+    assert!(allowed.status().is_success(), "-> {}", allowed.status());
 }

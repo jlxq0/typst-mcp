@@ -125,6 +125,22 @@ fn mcp_router(state: AppState) -> axum::Router {
 
     let render = Arc::clone(&state.render);
     let config = Arc::clone(&state.config);
+
+    // rmcp defends against DNS rebinding by refusing any `Host` it does not know,
+    // and its default list is loopback only — `localhost`, `127.0.0.1`, `::1`. That
+    // is the right default for a server on a laptop and completely wrong for a
+    // public deployment: every request arrives as `Host: typst-mcp.hanso.group` and
+    // is answered 403 *after* the bearer token has been accepted. A client sees a
+    // successful OAuth handshake followed by a connection it cannot open, and
+    // reports "failed to load / 0 tools" — which reads as an auth problem and is
+    // not one. Nothing on the loopback list can catch this: tests and local runs
+    // connect to 127.0.0.1 and pass.
+    //
+    // The public URL is where clients are told to connect, so it is exactly the
+    // Host they will send. Loopback stays on the list for local runs.
+    let mcp_config = StreamableHttpServerConfig::default()
+        .with_allowed_hosts(allowed_mcp_hosts(&state.config.public_url));
+
     let service = StreamableHttpService::new(
         move || {
             Ok(crate::mcp::TypstMcp::new(
@@ -133,7 +149,7 @@ fn mcp_router(state: AppState) -> axum::Router {
             ))
         },
         LocalSessionManager::default().into(),
-        StreamableHttpServerConfig::default(),
+        mcp_config,
     );
 
     axum::Router::new()
@@ -143,6 +159,26 @@ fn mcp_router(state: AppState) -> axum::Router {
             crate::auth::require_oidc,
         ))
         .with_state(state)
+}
+
+/// Hosts the MCP endpoint will answer to: whatever `PUBLIC_URL` names, plus loopback.
+///
+/// A bare host (no port) matches that host on any port, which is what a deployment
+/// behind a proxy needs — the client sends `Host: typst-mcp.hanso.group` while the
+/// process itself listens on :3000.
+fn allowed_mcp_hosts(public_url: &str) -> Vec<String> {
+    let mut hosts = vec![
+        "localhost".to_owned(),
+        "127.0.0.1".to_owned(),
+        "::1".to_owned(),
+    ];
+    if let Ok(url) = url::Url::parse(public_url)
+        && let Some(host) = url.host_str()
+        && !hosts.iter().any(|h| h == host)
+    {
+        hosts.push(host.to_owned());
+    }
+    hosts
 }
 
 // -- health & discovery ---------------------------------------------------------
@@ -551,4 +587,41 @@ fn now() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::allowed_mcp_hosts;
+
+    #[test]
+    fn the_public_host_is_allowed_alongside_loopback() {
+        let hosts = allowed_mcp_hosts("https://typst-mcp.hanso.group");
+        assert!(
+            hosts.iter().any(|h| h == "typst-mcp.hanso.group"),
+            "the host clients are told to connect to must be allowed: {hosts:?}"
+        );
+        // Local runs and the test suite connect over loopback; dropping these would
+        // trade one 403 for another.
+        for loopback in ["localhost", "127.0.0.1", "::1"] {
+            assert!(hosts.iter().any(|h| h == loopback), "{loopback}: {hosts:?}");
+        }
+    }
+
+    #[test]
+    fn a_public_url_with_a_port_contributes_the_bare_host() {
+        // A bare host matches on any port, which is what a deployment behind a
+        // proxy needs: the client says :443, the process listens on :3000.
+        let hosts = allowed_mcp_hosts("http://127.0.0.1:34567");
+        assert!(hosts.iter().any(|h| h == "127.0.0.1"), "{hosts:?}");
+        assert!(
+            !hosts.iter().any(|h| h.contains(':') && h != "::1"),
+            "{hosts:?}"
+        );
+    }
+
+    #[test]
+    fn an_unparseable_public_url_still_leaves_loopback() {
+        let hosts = allowed_mcp_hosts("not a url");
+        assert_eq!(hosts.len(), 3, "{hosts:?}");
+    }
 }

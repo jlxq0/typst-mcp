@@ -97,6 +97,15 @@ Specs in `.spec/`, ordered tasks in `Plan.md`, success criteria in `GOAL.md`.
   signature. `OIDC_AUDIENCE` is a list now; keep the URI first (it also qualifies bare
   scopes for authorize) and the GUID after it. Found 2026-08-17.
 
+- **rmcp's DNS-rebinding guard defaults to loopback only.**
+  `StreamableHttpServerConfig::default()` sets `allowed_hosts` to `localhost`,
+  `127.0.0.1`, `::1`, and answers **403** to any other `Host` — *after* the bearer
+  token has been accepted, so a client reports "failed to load MCP server / 0 tools"
+  and the operator goes looking at auth. No test can catch it by accident: the suite
+  and every local run connect over loopback, which is on the default list.
+  `mcp_router` now derives the list from `PUBLIC_URL`, which is by definition the
+  `Host` clients will send. Found 2026-08-17, one layer behind the audience bug below.
+
 - **`TraceLayer::new_for_http()` logs nothing at INFO.** Its request/response events are
   DEBUG, so the server emitted its startup banner and then went silent, and the OAuth
   incident above had to be reconstructed from Entra's audit logs instead of our own.
