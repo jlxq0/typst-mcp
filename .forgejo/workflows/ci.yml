@@ -56,10 +56,12 @@ jobs:
   docker:
     runs-on: ubuntu-22.04
     needs: cargo
-    # Tag builds must publish even if cargo is red. v0.1.0/v0.1.1/v0.1.2
-    # never produced an image because cargo failed and skipped docker.
-    # Local fmt/clippy/test pass on 6a84ac6; this unblocks the digest pin.
-    if: ${{ always() && startsWith(github.ref, 'refs/tags/v') }}
+    # The gate is the image: nothing publishes that has not passed fmt, clippy,
+    # the full test suite, audit and deny. This was relaxed to `always()` while
+    # the runaway-compile test failed on Linux only (a memory-bomb fixture, see
+    # tests/sandbox.rs RUNAWAY) — v0.1.3/v0.1.4/v0.1.5 shipped through that hole.
+    # The test is fixed, so the gate is back.
+    if: ${{ startsWith(github.ref, 'refs/tags/v') }}
     permissions: { contents: read, packages: write }
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4

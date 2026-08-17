@@ -49,6 +49,15 @@ Specs in `.spec/`, ordered tasks in `Plan.md`, success criteria in `GOAL.md`.
   `--compile-worker` re-runs libtest instead of compiling. Use
   `SpawnConfig::for_exe(env!("CARGO_BIN_EXE_typst-mcp"))`.
 
+- **`range(N)` in Typst materialises the whole array.** The runaway-compile
+  fixture used `#for i in range(300000000)`, which is a *memory* bomb, not a slow
+  computation. Linux enforces the worker's `RLIMIT_AS`, so the worker died allocating
+  in under a second and the request came back **500 instead of 504**; macOS does not
+  enforce that limit the same way, so it passed locally and failed only in CI — and
+  the reaction was to let the docker job publish `if: always()`, which shipped
+  v0.1.3/v0.1.4/v0.1.5 through a hole in the gate. A deadline fixture must be
+  CPU-bound: nested `range(20000)` loops, not one enormous range. Found 2026-08-17.
+
 - **Typst catches trivially infinite loops itself** (`#while true {}` → "loop seems to
   be infinite"), so it never reaches the deadline. The case the guard cannot catch is a
   heavy *finite* document, and that is what the timeout test must use — measured at

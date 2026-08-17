@@ -595,7 +595,11 @@ async fn a_runaway_document_times_out_and_the_server_keeps_serving() {
             "/api/v1/render",
             Some(ALICE),
             serde_json::json!({
-                "source": "#let acc = 0\n#for i in range(300000000) { acc = acc + i }\n#acc",
+                // Nested ranges on purpose: one `range(300000000)` is a memory bomb
+                // (Typst materialises the array), and under the worker's RLIMIT on
+                // Linux it dies allocating — 500, not the 504 this test is about.
+                // See the RUNAWAY constant in tests/sandbox.rs.
+                "source": "#let acc = 0\n#for i in range(20000) { for j in range(20000) { acc = acc + 1 } }\n#acc",
             }),
         )
         .await;
@@ -713,6 +717,135 @@ async fn oauth_as_metadata_and_dcr_are_public() {
 
     let mcp = server.get("/mcp", None).await;
     assert_eq!(mcp.status(), 401);
+}
+
+/// A native client does not agree with us about where discovery lives. Claude
+/// reads the bare RFC 8414 path, others path-insert after the resource or ask
+/// for the OIDC spelling. All four must answer, and answer the same thing —
+/// a client that probes the "wrong" one must not conclude there is no
+/// authorization server and fall back to "automatic registration unsupported".
+#[tokio::test]
+async fn every_discovery_path_a_native_client_probes_answers() {
+    let server = TestServer::start_with(&[
+        ("OIDC_ISSUER", "https://login.microsoftonline.com/abc/v2.0"),
+        ("OIDC_AUDIENCE", "api://typst-mcp"),
+        ("DCR_CLIENT_ID", "e20d1345-7e4e-4298-bf8d-6d4606b1ecb4"),
+        ("OAUTH_REDIRECT_URIS", "grokbot://mcp/oauth/callback"),
+    ])
+    .await;
+
+    for path in [
+        "/.well-known/oauth-authorization-server",
+        "/.well-known/oauth-authorization-server/mcp",
+        "/.well-known/openid-configuration",
+        "/.well-known/openid-configuration/mcp",
+    ] {
+        let response = server.get(path, None).await;
+        assert_eq!(response.status(), 200, "{path} must be public");
+        let body: serde_json::Value = response.json().await.expect("json");
+        assert_eq!(body["issuer"], server.base, "{path}");
+        assert_eq!(
+            body["registration_endpoint"],
+            format!("{}/register", server.base),
+            "{path}"
+        );
+    }
+}
+
+/// Grok Bot and Cursor call back to a private-use scheme. Entra cannot be the
+/// party that accepts those — it only ever sees our `/oauth/callback` — so the
+/// DCR shim and the authorize proxy are what must treat them as first-class.
+#[tokio::test]
+async fn native_client_callbacks_register_and_authorize() {
+    let server = TestServer::start_with(&[
+        ("OIDC_ISSUER", "https://login.microsoftonline.com/abc/v2.0"),
+        ("OIDC_AUDIENCE", "api://typst-mcp"),
+        ("DCR_CLIENT_ID", "e20d1345-7e4e-4298-bf8d-6d4606b1ecb4"),
+        (
+            "OAUTH_REDIRECT_URIS",
+            "grokbot://mcp/oauth/callback,\
+             cursor://anysphere.cursor-mcp/oauth/callback,\
+             http://localhost:8787/callback,\
+             https://www.cursor.com/agents/mcp/oauth/callback",
+        ),
+    ])
+    .await;
+
+    for uri in [
+        "grokbot://mcp/oauth/callback",
+        "cursor://anysphere.cursor-mcp/oauth/callback",
+        "http://localhost:8787/callback",
+        "https://www.cursor.com/agents/mcp/oauth/callback",
+    ] {
+        let created = server
+            .client
+            .post(server.url("/register"))
+            .json(&serde_json::json!({ "redirect_uris": [uri] }))
+            .send()
+            .await
+            .expect("register");
+        assert_eq!(created.status(), 201, "DCR must accept {uri}");
+        let reg: serde_json::Value = created.json().await.expect("json");
+        assert_eq!(reg["redirect_uris"][0], uri);
+
+        // ...and the authorize proxy must send the browser to Entra with our
+        // own callback substituted, never the private-use scheme. A client that
+        // followed the redirect would leave the test and hit real Entra, so this
+        // one stops at the 303.
+        let no_follow = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("client");
+        let authorize = no_follow
+            .get(server.url(&format!(
+                "/authorize?response_type=code&client_id=e20d1345-7e4e-4298-bf8d-6d4606b1ecb4\
+                 &redirect_uri={}&state=s&code_challenge=x&code_challenge_method=S256",
+                urlencoding(uri)
+            )))
+            .send()
+            .await
+            .expect("authorize");
+        assert_eq!(authorize.status(), 303, "authorize must redirect for {uri}");
+        let location = authorize
+            .headers()
+            .get("location")
+            .expect("location")
+            .to_str()
+            .expect("ascii");
+        assert!(
+            location.starts_with("https://login.microsoftonline.com/abc/oauth2/v2.0/authorize?"),
+            "{uri} -> {location}"
+        );
+        assert!(
+            location.contains(&urlencoding(&format!("{}/oauth/callback", server.base))),
+            "Entra must be handed our callback, not {uri}: {location}"
+        );
+    }
+
+    // An unlisted scheme is still refused — the allowlist is the control, not
+    // the scheme itself.
+    let rejected = server
+        .client
+        .post(server.url("/register"))
+        .json(&serde_json::json!({ "redirect_uris": ["evil://mcp/oauth/callback"] }))
+        .send()
+        .await
+        .expect("register");
+    assert_eq!(rejected.status(), 400);
+}
+
+/// Percent-encode a query-parameter value. Hand-rolled rather than pulled from
+/// `url`, which is a normal dependency and so invisible to an integration test.
+fn urlencoding(value: &str) -> String {
+    value
+        .bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                char::from(b).to_string()
+            }
+            other => format!("%{other:02X}"),
+        })
+        .collect()
 }
 
 #[tokio::test]

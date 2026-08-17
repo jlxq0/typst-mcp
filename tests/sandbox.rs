@@ -83,8 +83,18 @@ async fn assert_still_serving(service: &CompileService) {
 /// seems to be infinite", so it never reaches the deadline and would test nothing.
 /// The real risk is the case its guard cannot catch — a finite computation that
 /// simply takes too long. Measured on an M-series laptop: 40M iterations ≈ 4.3s,
-/// 300M ≈ well past 30s.
-const RUNAWAY: &str = "#let acc = 0\n#for i in range(300000000) { acc = acc + i }\n#acc";
+/// so 400M is well past any deadline in these tests.
+///
+/// Equally deliberately **nested**, rather than one `range(300000000)`. Typst's
+/// `range` materialises the whole array before the loop runs, so a single huge
+/// range is a *memory* bomb, not a slow computation: under the worker's
+/// `RLIMIT_AS` on Linux it dies allocating, in under a second, and the request
+/// comes back 500 instead of 504. macOS does not enforce that limit the same way,
+/// so the single-range version passed locally and failed only in CI. Nested ranges
+/// of 20 000 keep the allocation at a few hundred KiB and put the cost in the
+/// iteration, which is what the deadline is supposed to catch.
+const RUNAWAY: &str =
+    "#let acc = 0\n#for i in range(20000) { for j in range(20000) { acc = acc + 1 } }\n#acc";
 
 #[tokio::test]
 async fn typst_catches_trivial_infinite_loops_itself() {

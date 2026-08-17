@@ -19,6 +19,10 @@ origin-only metadata:
 | Metadata | `/.well-known/oauth-protected-resource/mcp` |
 | Origin probe | `/.well-known/oauth-protected-resource` (same document) |
 | 401 on `/mcp` | `WWW-Authenticate: Bearer resource_metadata="{origin}/.well-known/oauth-protected-resource/mcp"` |
+| `authorization_servers` | `{origin}` — this process, not Entra directly |
+| AS metadata (RFC 8414) | `/.well-known/oauth-authorization-server`, also served at `…/mcp`, `/.well-known/openid-configuration` and `…/mcp` |
+| DCR (RFC 7591) | `POST /register` |
+| Proxied to Entra | `GET /authorize`, `POST /token`, `GET /oauth/callback` |
 
 The server validates Entra access tokens. Claude Desktop/Cowork insist on
 Dynamic Client Registration, so this process also fronts Entra: it serves
@@ -26,6 +30,15 @@ RFC 8414 metadata with a `registration_endpoint`, a `/register` shim that
 hands out a pre-provisioned public SPA client, and same-origin `/authorize`
 + `/token` that proxy to Hanso Entra. Entra only ever sees
 `{origin}/oauth/callback`.
+
+That indirection is what makes native clients work at all. Grok Bot and Cursor
+call back to private-use schemes (`grokbot://…`, `cursor://…`), which a web
+app registration cannot hold; the proxy stores the client's redirect URI,
+hands Entra its own HTTPS callback, and restores the scheme on the way back.
+Only URIs listed in `TYPST_MCP_OAUTH_REDIRECT_URIS` are accepted, at
+`/register`, `/authorize` and `/token` alike — an exact-string allowlist, and
+cleartext `http` only on a loopback host (RFC 8252 §7.3). There is no
+"allow insecure URIs" switch and there will not be one.
 
 ## Tools
 

@@ -63,8 +63,25 @@ pub fn router(state: AppState) -> axum::Router {
             "/.well-known/oauth-protected-resource/mcp",
             get(protected_resource_metadata),
         )
+        // RFC 8414. The issuer is this origin, so the bare path is the
+        // canonical one; the other three are what native MCP clients actually
+        // probe (path-inserted after the resource, and the OIDC spelling).
+        // One handler behind all four — a client that finds any of them finds
+        // the same authorization server.
         .route(
             "/.well-known/oauth-authorization-server",
+            get(authorization_server_metadata),
+        )
+        .route(
+            "/.well-known/oauth-authorization-server/mcp",
+            get(authorization_server_metadata),
+        )
+        .route(
+            "/.well-known/openid-configuration",
+            get(authorization_server_metadata),
+        )
+        .route(
+            "/.well-known/openid-configuration/mcp",
             get(authorization_server_metadata),
         )
         .route("/register", post(register))

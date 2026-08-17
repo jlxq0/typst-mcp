@@ -92,6 +92,12 @@ pub struct AuthorizationServerMetadata {
     pub code_challenge_methods_supported: Vec<&'static str>,
     pub token_endpoint_auth_methods_supported: Vec<&'static str>,
     pub scopes_supported: Vec<String>,
+    /// Present so this document also satisfies a client that fetches it from
+    /// `/.well-known/openid-configuration` and validates it as OIDC discovery.
+    /// All three describe the upstream Entra flow we proxy, not a second one.
+    pub response_modes_supported: Vec<&'static str>,
+    pub subject_types_supported: Vec<&'static str>,
+    pub id_token_signing_alg_values_supported: Vec<&'static str>,
 }
 
 impl AuthorizationServerMetadata {
@@ -108,6 +114,9 @@ impl AuthorizationServerMetadata {
             code_challenge_methods_supported: vec!["S256"],
             token_endpoint_auth_methods_supported: vec!["none"],
             scopes_supported: scopes_supported(oidc),
+            response_modes_supported: vec!["query"],
+            subject_types_supported: vec!["public"],
+            id_token_signing_alg_values_supported: vec!["RS256"],
         }
     }
 }
