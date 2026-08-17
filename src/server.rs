@@ -71,9 +71,42 @@ impl Server {
 
         self.spawn_reaper();
 
+        // One line per request, at INFO.
+        //
+        // `TraceLayer::new_for_http()` on its own emits nothing here: its request and
+        // response events are DEBUG, so with `RUST_LOG=typst_mcp=info` the server
+        // logged its startup banner and then went silent. When an OAuth handshake
+        // failed there was no record that `/authorize`, `/oauth/callback` or `/token`
+        // had even been called, and the incident had to be reconstructed from Entra's
+        // sign-in logs.
+        //
+        // **Path only, never the query string.** An authorization code arrives on the
+        // query of `/oauth/callback`, and a code in a log file is a credential in a log
+        // file — the default span formats the whole URI, which is precisely wrong here.
+        let access_log = tower_http::trace::TraceLayer::new_for_http()
+            .make_span_with(|request: &axum::http::Request<axum::body::Body>| {
+                tracing::info_span!(
+                    "http",
+                    method = %request.method(),
+                    path = %request.uri().path(),
+                )
+            })
+            .on_request(())
+            .on_response(
+                |response: &axum::http::Response<axum::body::Body>,
+                 latency: std::time::Duration,
+                 _: &tracing::Span| {
+                    tracing::info!(
+                        status = response.status().as_u16(),
+                        latency_ms = latency.as_millis(),
+                        "handled"
+                    );
+                },
+            );
+
         let app = self
             .router()
-            .layer(tower_http::trace::TraceLayer::new_for_http())
+            .layer(access_log)
             .layer(axum::extract::DefaultBodyLimit::max(
                 config.max_upload_bytes,
             ));

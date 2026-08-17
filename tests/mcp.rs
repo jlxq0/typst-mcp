@@ -668,3 +668,68 @@ async fn preview_pages_are_capped_even_when_many_are_requested() {
 
     assert!(images_in(&result).len() <= 4, "over the preview cap");
 }
+
+/// A client that speaks an older MCP revision must still get the tool list.
+///
+/// Grok Bot and Cursor negotiate 2025-06-18 / 2025-11-25: they open with an
+/// `initialize` handshake, echo back the `Mcp-Session-Id` they are handed, and
+/// send none of the SEP-2243 `Mcp-*` headers that 2026-07-28 requires. The server
+/// pins 2026-07-28 for itself, so it would be easy to assume such a client is the
+/// reason a connector shows zero tools. It is not — and this test is what keeps
+/// that answer trustworthy, so the next "0 tools" report is diagnosed instead of
+/// guessed at.
+#[tokio::test]
+async fn a_client_on_an_older_protocol_revision_still_gets_the_tools() {
+    let server = TestServer::start().await;
+    let token = server.idp.token("alice");
+
+    let init = server
+        .rpc(
+            Some(&token),
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": {},
+                    "clientInfo": { "name": "older-client", "version": "1" }
+                }
+            }),
+        )
+        .await;
+    assert!(
+        init.status().is_success(),
+        "initialize -> {}",
+        init.status()
+    );
+    let session = init
+        .headers()
+        .get("mcp-session-id")
+        .expect("an older client is handed a session id")
+        .to_str()
+        .expect("ascii")
+        .to_owned();
+
+    let listed = server
+        .client
+        .post(format!("{}/mcp", server.base))
+        .header("accept", "application/json, text/event-stream")
+        .header("mcp-session-id", &session)
+        .bearer_auth(&token)
+        .json(&serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}))
+        .send()
+        .await
+        .expect("request");
+    assert!(
+        listed.status().is_success(),
+        "tools/list in the old shape -> {}",
+        listed.status()
+    );
+    let body = listed.text().await.expect("body");
+    assert!(
+        body.contains("typst_render"),
+        "an older client must see the tools: {}",
+        &body[..body.len().min(300)]
+    );
+}

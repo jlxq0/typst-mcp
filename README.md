@@ -74,7 +74,7 @@ OIDC is configured.
 | Variable | Meaning |
 |---|---|
 | `TYPST_MCP_OIDC_ISSUER` | Entra issuer, e.g. `https://login.microsoftonline.com/<tenant-id>/v2.0`. Do not invent the tenant GUID — copy it from Entra. |
-| `TYPST_MCP_OIDC_AUDIENCE` | App ID URI or client id this server accepts as `aud`. Required when issuer is set. |
+| `TYPST_MCP_OIDC_AUDIENCE` | Comma-separated `aud` values this server accepts. Required when issuer is set. **Put the App ID URI first** (it also qualifies bare scopes for the authorize request) and the API's **client-ID GUID** second — Entra puts the GUID in every v2.0 access token, so a URI-only setting rejects every real token. |
 | `TYPST_MCP_OIDC_TENANT_ID` | Optional directory GUID, checked against the token `tid`. |
 | `TYPST_MCP_OIDC_SCOPE` | Scope a token must carry. Default: `render`. |
 | `TYPST_MCP_DCR_CLIENT_ID` | Pre-provisioned Entra public SPA `client_id` returned by `/register`. |
@@ -100,12 +100,16 @@ invent tenant or client GUIDs — copy them from the portal after the app exists
 1. Entra admin center → **Identity** → **Applications** → **App registrations** → **New registration**.
 2. Name: `typst-mcp`.
 3. Supported account types: **Accounts in this organizational directory only**.
-4. Redirect URI: **none on this registration**. This process is a resource server
-   and has no `/oauth/callback`. (jmap-mcp's `https://…/oauth/callback` is a
-   different shape — an OAuth proxy. Do not add that path here.)
-5. **Expose an API** → set the Application ID URI. That value is
-   `TYPST_MCP_OIDC_AUDIENCE`.
+4. Redirect URI: **none on this API registration**. The redirect URIs belong on the
+   second, public-client registration below.
+5. **Expose an API** → set the Application ID URI. That value is the **first** entry
+   of `TYPST_MCP_OIDC_AUDIENCE`.
 6. Add a scope named `render` (the code default).
+6b. Overview → copy the **Application (client) ID** of this API registration and
+   append it to `TYPST_MCP_OIDC_AUDIENCE` after the URI. This is not optional
+   housekeeping: with `requestedAccessTokenVersion: 2`, every access token Entra
+   mints carries the **GUID** in `aud`, so a server configured with the URI alone
+   401s every request and clients loop through re-auth forever.
 7. Overview → copy **Directory (tenant) ID**. Then:
    - `TYPST_MCP_OIDC_ISSUER=https://login.microsoftonline.com/<tenant-id>/v2.0`
    - optionally `TYPST_MCP_OIDC_TENANT_ID=<tenant-id>` so a token from another

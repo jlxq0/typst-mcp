@@ -92,6 +92,19 @@ impl Audience {
     }
 }
 
+impl std::fmt::Display for Audience {
+    /// For the rejection log line. An `aud` claim names an application; it is not a
+    /// secret, and printing it is the difference between a five-minute fix and an
+    /// afternoon of archaeology.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::One(value) => f.write_str(value),
+            Self::Many(values) => f.write_str(&values.join(",")),
+            Self::None => f.write_str("<absent>"),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct Jwks {
     keys: Vec<Jwk>,
@@ -180,17 +193,43 @@ impl TokenValidator {
                 .extra_audiences
                 .iter()
                 .any(|a| claims.aud.contains(a));
+        // Log *which* check failed, with the claim values. A token is a credential and
+        // is never logged; `aud`/`iss`/`tid`/`scp` are identifiers and scope names, and
+        // without them a rejection is indistinguishable from a broken client. The 401
+        // the caller gets stays deliberately vague — this line is for the operator.
         if claims.iss != self.config.issuer || !aud_ok {
+            tracing::warn!(
+                reason = if aud_ok { "issuer" } else { "audience" },
+                token_aud = %claims.aud,
+                token_iss = %claims.iss,
+                expected_aud = %self.config.audience,
+                also_accepted = ?self.config.extra_audiences,
+                expected_iss = %self.config.issuer,
+                "rejected a token"
+            );
             return Err(TokenError::Rejected);
         }
 
         if let Some(expected) = &self.config.tenant_id
             && claims.tid.as_deref() != Some(expected.as_str())
         {
+            tracing::warn!(
+                reason = "tenant",
+                token_tid = ?claims.tid,
+                expected_tid = %expected,
+                "rejected a token"
+            );
             return Err(TokenError::Rejected);
         }
 
         if !self.has_scope(&claims) {
+            tracing::warn!(
+                reason = "scope",
+                token_scp = ?claims.scp,
+                token_roles = ?claims.roles,
+                expected_scope = %self.config.scope,
+                "rejected a token"
+            );
             return Err(TokenError::Rejected);
         }
 

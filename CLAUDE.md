@@ -87,6 +87,22 @@ Specs in `.spec/`, ordered tasks in `Plan.md`, success criteria in `GOAL.md`.
   there. An earlier version handed the tenant to the service factory through a shared
   slot, which two concurrent sessions could swap.
 
+- **An Entra v2.0 access token's `aud` is the API's client-ID GUID, never the
+  `api://` App ID URI.** The URI form appears only in v1.0 tokens, and our API app has
+  `requestedAccessTokenVersion: 2`. Configuring `OIDC_AUDIENCE=api://typst-mcp` alone
+  therefore rejects *every* real token, and the symptom is not an error anyone sees: the
+  client completes OAuth, gets 401 from `/mcp`, assumes its token is stale, re-runs the
+  whole flow, and reports "needs auth, 0 tools" forever. Entra's non-interactive sign-in
+  log showed five successful redemptions in sixteen seconds — that retry storm *is* the
+  signature. `OIDC_AUDIENCE` is a list now; keep the URI first (it also qualifies bare
+  scopes for authorize) and the GUID after it. Found 2026-08-17.
+
+- **`TraceLayer::new_for_http()` logs nothing at INFO.** Its request/response events are
+  DEBUG, so the server emitted its startup banner and then went silent, and the OAuth
+  incident above had to be reconstructed from Entra's audit logs instead of our own.
+  `serve()` now sets `on_response` to INFO explicitly. Log the **path, never the URI** —
+  `/oauth/callback` carries an authorization code in its query string.
+
 - **`jsonwebtoken` defaults to 60 seconds of `exp`/`nbf` leeway.** Set
   `validation.leeway` explicitly so the tolerance is a decision rather than an
   inherited default, and remember it when writing a test for an expired token.

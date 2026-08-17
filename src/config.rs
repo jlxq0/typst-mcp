@@ -135,13 +135,42 @@ impl Config {
             });
         }
         let oidc = match get("OIDC_ISSUER") {
-            Some(issuer) if !issuer.trim().is_empty() => Some(OidcConfig {
-                issuer: issuer.trim().trim_end_matches('/').to_owned(),
-                tenant_id: get("OIDC_TENANT_ID").filter(|v| !v.trim().is_empty()),
-                audience: required(get, "OIDC_AUDIENCE")?,
-                scope: get("OIDC_SCOPE").unwrap_or_else(|| "render".into()),
-                extra_audiences: vec![format!("{public_url}/mcp")],
-            }),
+            Some(issuer) if !issuer.trim().is_empty() => {
+                // `OIDC_AUDIENCE` is a list, because one deployment legitimately has
+                // more than one spelling of the same audience. Entra decides which it
+                // mints: a **v2.0 access token's `aud` is the API's client-ID GUID**,
+                // while the App ID URI (`api://typst-mcp`) only ever appears in v1.0
+                // tokens. A server that accepts just the URI rejects every real token
+                // and the client loops through re-auth forever, which is exactly what
+                // happened on 2026-08-17.
+                //
+                // The **first** entry keeps its other job: qualifying a bare scope for
+                // an Entra authorize request (`api://typst-mcp` + `render`), so it must
+                // stay the App ID URI. The rest are accepted for `aud` and nothing else.
+                let audiences: Vec<String> = required(get, "OIDC_AUDIENCE")?
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                    .map(str::to_owned)
+                    .collect();
+                let mut audiences = audiences.into_iter();
+                let Some(audience) = audiences.next() else {
+                    return Err(ConfigError::Invalid {
+                        name: "OIDC_AUDIENCE",
+                        value: String::new(),
+                        expected: "at least one audience",
+                    });
+                };
+                let mut extra_audiences: Vec<String> = audiences.collect();
+                extra_audiences.push(format!("{public_url}/mcp"));
+                Some(OidcConfig {
+                    issuer: issuer.trim().trim_end_matches('/').to_owned(),
+                    tenant_id: get("OIDC_TENANT_ID").filter(|v| !v.trim().is_empty()),
+                    audience,
+                    scope: get("OIDC_SCOPE").unwrap_or_else(|| "render".into()),
+                    extra_audiences,
+                })
+            }
             _ => None,
         };
 
@@ -405,6 +434,40 @@ mod tests {
         let oidc = config.oidc.expect("configured");
         assert_eq!(oidc.audience, "api://typst-mcp");
         assert_eq!(oidc.scope, "render", "scope should default");
+    }
+
+    /// Entra mints `aud` as the API's **client-ID GUID** for v2.0 access tokens; the
+    /// `api://` App ID URI appears only in v1.0 tokens. Configuring one spelling and
+    /// receiving the other is a total outage that looks like a client bug: every
+    /// request 401s, so the client re-runs OAuth, gets a token, 401s again, forever.
+    /// Both spellings name the same application, so both are accepted — and the first
+    /// stays the URI because it is also what qualifies a bare scope for Entra.
+    #[test]
+    fn oidc_audience_accepts_a_list_and_keeps_the_uri_first() {
+        let config = load(&[
+            ("OIDC_ISSUER", "https://login.microsoftonline.com/abc/v2.0"),
+            (
+                "OIDC_AUDIENCE",
+                "api://typst-mcp, 57eb9d5b-1bb5-4df0-b62e-e8343e1d2367",
+            ),
+        ])
+        .expect("loads");
+        let oidc = config.oidc.expect("configured");
+        assert_eq!(
+            oidc.audience, "api://typst-mcp",
+            "the first entry qualifies scopes, so it must stay the App ID URI"
+        );
+        assert!(
+            oidc.extra_audiences
+                .contains(&"57eb9d5b-1bb5-4df0-b62e-e8343e1d2367".to_owned()),
+            "the v2.0 GUID audience must be accepted: {:?}",
+            oidc.extra_audiences
+        );
+        assert!(
+            oidc.extra_audiences.iter().any(|a| a.ends_with("/mcp")),
+            "the RFC 8707 resource audience must survive the change: {:?}",
+            oidc.extra_audiences
+        );
     }
 
     #[test]
