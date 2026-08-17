@@ -116,5 +116,24 @@ cargo fmt --all --check \
 - MCP vhosts need **`flush_interval -1`** in Caddy or the streamable-HTTP stream buffers
   and the client hangs with no error.
 - 1Password: store `onepassword-hanso` reaches vaults `Gruyere` and `Oddie Apps`. There
-  is no vault named "Hanso". App item goes in **Gruyere**; registry creds are shared from
-  the `matrix-mcp-www` item.
+  is no vault named "Hanso". Registry creds are shared from the `matrix-mcp-www` item.
+  The app's own item is **`typst-mcp-www` in `Oddie Apps`**, not Gruyere — the comment in
+  `platform/clusters/fondue/typst-mcp/external-secret.yaml` still says Gruyere and is
+  wrong. It holds `TENANT_SALT`, `SIGNING_SECRET`, `OIDC_ISSUER`, `OIDC_AUDIENCE` only.
+
+## Verified environment facts (2026-08-17)
+
+- **The canonical origin is `https://typst-mcp.hanso.group`.** It is the RFC 9728
+  `resource` (`{origin}/mcp`), the RFC 8414 `issuer`, and the callback Entra has
+  registered — so it is an identity boundary, not a routing detail. The HTTPRoute also
+  answers `typst-mcp.kampong.social`; that name is a spare, and nothing may advertise it.
+- The Caddy vhost for `typst-mcp.hanso.group` was running on the edge **without being in
+  `edge-config/caddy/Caddyfile`**. An `edge-config-sync.sh` run would have deleted it and
+  taken OAuth down with it. Now committed, sharing one block with the kampong name.
+- Entra (tenant `96e9b6ca-420e-4193-a079-bbf83b313f5f`) has **two** app registrations:
+  the API `typst-mcp` (`api://typst-mcp`, appId `57eb9d5b-1bb5-4df0-b62e-e8343e1d2367`,
+  delegated scope `render`), and the public client `typst-mcp-public`
+  (`10c81c41-1b0d-4954-b855-25fe19d9dbce`, `isFallbackPublicClient: true`) which the API
+  pre-authorises and `/register` hands out. Only the second carries redirect URIs.
+- Entra v2's `/authorize` **tolerates the RFC 8707 `resource` parameter** — verified by
+  request, not by documentation. The proxy passes it through when it names our MCP URL.
