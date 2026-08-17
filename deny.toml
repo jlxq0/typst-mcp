@@ -7,7 +7,12 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
-ignore = []
+ignore = [
+    # Transitive via typst 0.15.1 -> hayagriva -> citationberg -> quick-xml 0.38.4.
+    # Fix is quick-xml >= 0.41.0; not reachable without a typst release.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+]
 
 [bans]
 multiple-versions = "warn"
@@ -32,6 +37,10 @@ allow = [
     "Zlib",
     "MPL-2.0",
     "CC0-1.0",
+    # MIT-0 (MIT No Attribution) — borrow-or-share via jsonschema. More
+    # permissive than MIT; OSI-approved. jsonschema is how we validate
+    # template arguments.
+    "MIT-0",
     # CDLA-Permissive-2.0 is used by webpki-roots (Mozilla CA bundle, pulled
     # in transitively by reqwest+rustls). It's a permissive license written
     # for "shared data" rather than code, mostly equivalent to MIT in effect

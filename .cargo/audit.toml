@@ -1,0 +1,10 @@
+# cargo-audit: ignore only what we cannot bump ourselves.
+[advisories]
+ignore = [
+    # Transitive via typst 0.15.1 -> hayagriva -> citationberg -> quick-xml 0.38.4.
+    # NsReader DoS / quadratic attribute check. Fix is >= 0.41.0; drop these
+    # when typst publishes a tree that takes it. Compile timeout is a partial
+    # mitigation for uploaded bundles.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+]
