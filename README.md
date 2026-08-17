@@ -5,12 +5,11 @@ Streamable HTTP at `/mcp`, behind Microsoft Entra OIDC. Compiles run in a
 short-lived subprocess so Typst's process-global interners cannot accumulate
 across documents.
 
-Live URL (once DNS + Entra + Argo are in place):
-`https://typst-mcp.kampong.social/mcp`
+Self-host the `/mcp` endpoint on your own domain.
 
 ## Shape (RFC 9728 / MCP authorization)
 
-Matches [matrix-mcp](https://forge.oddie.app/jlxq0/matrix-mcp), not the older
+Matches [matrix-mcp](https://github.com/jlxq0/matrix-mcp), not the older
 origin-only metadata:
 
 | Piece | Value |
@@ -49,7 +48,7 @@ OIDC is configured.
 
 | Variable | Meaning |
 |---|---|
-| `TYPST_MCP_PUBLIC_URL` | Public origin, no trailing slash. Production: `https://typst-mcp.kampong.social` |
+| `TYPST_MCP_PUBLIC_URL` | Public origin, no trailing slash. Example: `https://typst-mcp.your-domain.example` |
 | `TYPST_MCP_TENANT_SALT` | ≥32 bytes. Derives per-caller storage partitions. Rotating it re-partitions every tenant. |
 | `TYPST_MCP_SIGNING_SECRET` | ≥32 bytes. Keys signed download URLs. Rotating it invalidates outstanding links. |
 
@@ -97,9 +96,8 @@ invent tenant or client GUIDs — copy them from the portal after the app exists
    (`https://claude.ai/api/mcp/auth_callback`, etc.). Do not invent those client
    IDs; add them when the first client is wired.
 
-Store issuer, audience, tenant salt, and signing secret in a 1Password item
-`typst-mcp-www` in the **Gruyere** vault. The cluster pull secret is shared from
-the existing `matrix-mcp-www` item (`forge-dockerconfigjson`).
+Store issuer, audience, tenant salt, and signing secret in your secret manager.
+The image pull secret is whatever your registry requires.
 
 ## Local development
 
@@ -123,24 +121,24 @@ cargo clippy --all-targets --all-features --locked -- -D warnings
 cargo test --all-features --locked
 ```
 
-OIDC is optional locally. Production on fondue uses Entra only for `/mcp`.
+OIDC is optional locally. Production typically uses Entra only for `/mcp`.
 
 ## Image / CI
 
 Forgejo CI (`.forgejo/workflows/ci.yml`) matches matrix-mcp: fmt, clippy, test,
 audit, deny, then `buildctl` against Pada's buildkitd. `v*` tags push
 
-`forge.oddie.app/jlxq0/typst-mcp:<tag>` (and GHCR).
+`your-registry.example/typst-mcp:<tag>` (and GHCR).
 
 ```sh
 docker run --rm -p 3000:3000 \
-  -e TYPST_MCP_PUBLIC_URL=https://typst-mcp.kampong.social \
+  -e TYPST_MCP_PUBLIC_URL=https://typst-mcp.your-domain.example \
   -e TYPST_MCP_TENANT_SALT=... \
   -e TYPST_MCP_SIGNING_SECRET=... \
   -e TYPST_MCP_OIDC_ISSUER=https://login.microsoftonline.com/<tenant-id>/v2.0 \
   -e TYPST_MCP_OIDC_AUDIENCE=api://typst-mcp \
   -v typst-data:/data \
-  forge.oddie.app/jlxq0/typst-mcp:v0.1.0
+  your-registry.example/typst-mcp:v0.1.0
 ```
 
 ## Licence
