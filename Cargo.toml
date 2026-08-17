@@ -1,6 +1,6 @@
 [package]
 name = "typst-mcp"
-version = "0.1.0"
+version = "0.1.4"
 edition = "2024"
 rust-version = "1.93"
 license = "MIT"
@@ -82,6 +82,8 @@ subtle = "2.6"
 hex = "0.4"
 zeroize = { version = "1", features = ["zeroize_derive"] }
 ulid = "1"
+url = "2.5"
+rand = "0.8"
 
 # --- template manifests + data validation ---
 toml = "1.1"

@@ -101,6 +101,10 @@ register one app, validate JWTs, serve RFC 9728 protected-resource metadata. No 
 shim, no OAuth proxy — unlike `jmap-mcp`, which needed both against Logto under the old
 rules.
 
+**The identity provider here is the Hanso Group Entra tenant, and only that.** Logto at
+`login.kampong.social` is the IdP for the JMAP and Matrix servers; it is never this
+server's issuer, and the two must not be mixed in config, docs or 1Password items.
+
 ## 7. Shape
 
 ```
@@ -109,7 +113,7 @@ rules.
    (Entra OAuth)    │   /mcp                 rmcp, 2026-07-28    │
                     │   /api/v1/*            static API key      │
   Phoenix apps ────▶│   /files/*             bearer | signature  │
-   (in-cluster)     │   /.well-known/oauth-protected-resource    │
+   (in-cluster)     │   /.well-known/oauth-protected-resource/mcp│
                     │                                            │
                     │  Principal ─▶ tenant = HMAC(salt, sub|key) │
                     │  /data/t_<tenant>/{assets,tpl,out}         │

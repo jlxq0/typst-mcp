@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use thiserror::Error;
 
+use crate::oauth_redirect;
 use crate::principal::ApiKeys;
 use crate::store::Limits;
 
@@ -59,6 +60,7 @@ pub struct OidcConfig {
     pub audience: String,
     /// The scope a token must carry.
     pub scope: String,
+    pub extra_audiences: Vec<String>,
 }
 
 /// Everything the server needs to run.
@@ -76,6 +78,8 @@ pub struct Config {
 
     pub api_keys: ApiKeys,
     pub oidc: Option<OidcConfig>,
+    pub dcr_client_id: Option<String>,
+    pub oauth_redirect_uris: Vec<String>,
 
     /// The binary to spawn for compiles. `None` re-execs this process, which is
     /// correct in production but wrong inside a test harness, where `current_exe()`
@@ -111,12 +115,32 @@ impl Config {
         let api_keys = get("API_KEYS")
             .map(|v| ApiKeys::parse(&v))
             .unwrap_or_default();
+        let dcr_client_id = get("DCR_CLIENT_ID").filter(|v| !v.trim().is_empty());
+        let oauth_redirect_uris =
+            if let Some(raw) = get("OAUTH_REDIRECT_URIS").filter(|v| !v.trim().is_empty()) {
+                oauth_redirect::parse_allowlist(&raw, oauth_redirect::ENV_OAUTH_REDIRECT_URIS)
+                    .map_err(|_| ConfigError::Invalid {
+                        name: "OAUTH_REDIRECT_URIS",
+                        value: raw,
+                        expected: "comma-separated redirect URIs",
+                    })?
+            } else {
+                Vec::new()
+            };
+        if dcr_client_id.is_some() && oauth_redirect_uris.is_empty() {
+            return Err(ConfigError::Invalid {
+                name: "OAUTH_REDIRECT_URIS",
+                value: String::new(),
+                expected: "at least one redirect URI when DCR_CLIENT_ID is set",
+            });
+        }
         let oidc = match get("OIDC_ISSUER") {
             Some(issuer) if !issuer.trim().is_empty() => Some(OidcConfig {
                 issuer: issuer.trim().trim_end_matches('/').to_owned(),
                 tenant_id: get("OIDC_TENANT_ID").filter(|v| !v.trim().is_empty()),
                 audience: required(get, "OIDC_AUDIENCE")?,
                 scope: get("OIDC_SCOPE").unwrap_or_else(|| "render".into()),
+                extra_audiences: vec![format!("{public_url}/mcp")],
             }),
             _ => None,
         };
@@ -143,6 +167,8 @@ impl Config {
 
             api_keys,
             oidc,
+            dcr_client_id,
+            oauth_redirect_uris,
 
             worker_exe: get("WORKER_EXE")
                 .filter(|v| !v.trim().is_empty())

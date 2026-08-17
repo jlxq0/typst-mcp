@@ -1,6 +1,8 @@
 # syntax=docker/dockerfile:1.7
 
 # Multi-stage build → distroless runtime.
+# RFC 9728: advertise resource as {origin}/mcp (see src/config.rs mcp_resource_url).
+# Do not invent Entra app IDs here; they live in deploy config, not this image.
 # Compatible with fondue PSS-restricted namespace conventions.
 # The same binary is the HTTP server and the compile worker (`--compile-worker`).
 

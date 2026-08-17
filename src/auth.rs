@@ -345,6 +345,7 @@ mod tests {
                 tenant_id: Some("abc".into()),
                 audience: "api://typst-mcp".into(),
                 scope: "render".into(),
+                extra_audiences: vec![],
             }),
             "https://typst.example.com/.well-known/oauth-protected-resource/mcp",
         );

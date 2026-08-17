@@ -161,7 +161,9 @@ impl TokenValidator {
         ) {
             return Err(TokenError::Rejected);
         }
-        validation.set_audience(&[&self.config.audience]);
+        let mut audiences = vec![self.config.audience.clone()];
+        audiences.extend(self.config.extra_audiences.iter().cloned());
+        validation.set_audience(&audiences);
         validation.set_issuer(&[&self.config.issuer]);
         validation.validate_exp = true;
         validation.validate_nbf = true;
@@ -172,7 +174,13 @@ impl TokenValidator {
 
         // jsonwebtoken checks `iss` and `aud`, but re-checking here means the guarantee
         // does not depend on a validation flag staying set through a refactor.
-        if claims.iss != self.config.issuer || !claims.aud.contains(&self.config.audience) {
+        let aud_ok = claims.aud.contains(&self.config.audience)
+            || self
+                .config
+                .extra_audiences
+                .iter()
+                .any(|a| claims.aud.contains(a));
+        if claims.iss != self.config.issuer || !aud_ok {
             return Err(TokenError::Rejected);
         }
 
@@ -287,6 +295,7 @@ mod tests {
             tenant_id: Some("abc".into()),
             audience: "api://typst-mcp".into(),
             scope: "render".into(),
+            extra_audiences: vec![],
         }
     }
 

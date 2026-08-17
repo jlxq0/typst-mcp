@@ -551,11 +551,18 @@ async fn oauth_metadata_is_served_when_oidc_is_configured() {
 
     let body: serde_json::Value = response.json().await.expect("json");
     assert_eq!(
-        body["authorization_servers"][0],
-        "https://login.microsoftonline.com/abc/v2.0"
+        body["authorization_servers"][0], server.base,
+        "authorization_servers must be this origin so Claude finds DCR"
     );
     assert_eq!(body["bearer_methods_supported"][0], "header");
-    assert_eq!(body["scopes_supported"][0], "render");
+    assert!(
+        body["scopes_supported"]
+            .as_array()
+            .expect("scopes")
+            .iter()
+            .any(|s| s == "render"),
+        "scopes_supported must still advertise render: {body}"
+    );
     assert_eq!(
         body["resource"],
         format!("{}/mcp", server.base),
@@ -637,4 +644,84 @@ async fn a_request_with_neither_template_nor_source_says_so() {
             .contains("template"),
         "{body}"
     );
+}
+
+#[tokio::test]
+async fn oauth_as_metadata_and_dcr_are_public() {
+    let server = TestServer::start_with(&[
+        ("OIDC_ISSUER", "https://login.microsoftonline.com/abc/v2.0"),
+        ("OIDC_AUDIENCE", "api://typst-mcp"),
+        ("DCR_CLIENT_ID", "e20d1345-7e4e-4298-bf8d-6d4606b1ecb4"),
+        (
+            "OAUTH_REDIRECT_URIS",
+            "https://claude.ai/api/mcp/auth_callback,https://claude.com/api/mcp/auth_callback,https://www.cursor.com/agents/mcp/oauth/callback,cursor://anysphere.cursor-mcp/oauth/callback,grokbot://mcp/oauth/callback,http://localhost:8787/callback",
+        ),
+    ])
+    .await;
+
+    let as_meta = server
+        .get("/.well-known/oauth-authorization-server", None)
+        .await;
+    assert_eq!(
+        as_meta.status(),
+        200,
+        "AS metadata must not require a bearer"
+    );
+    let body: serde_json::Value = as_meta.json().await.expect("json");
+    assert_eq!(body["issuer"], server.base);
+    assert_eq!(
+        body["registration_endpoint"],
+        format!("{}/register", server.base)
+    );
+    assert_eq!(
+        body["authorization_endpoint"],
+        format!("{}/authorize", server.base)
+    );
+    assert_eq!(body["token_endpoint"], format!("{}/token", server.base));
+    assert!(
+        body["code_challenge_methods_supported"]
+            .as_array()
+            .expect("pkce")
+            .iter()
+            .any(|m| m == "S256")
+    );
+
+    let created = server
+        .client
+        .post(server.url("/register"))
+        .json(&serde_json::json!({
+            "redirect_uris": ["https://claude.ai/api/mcp/auth_callback"]
+        }))
+        .send()
+        .await
+        .expect("register");
+    assert_eq!(created.status(), 201, "DCR must not require a bearer");
+    let reg: serde_json::Value = created.json().await.expect("json");
+    assert_eq!(reg["client_id"], "e20d1345-7e4e-4298-bf8d-6d4606b1ecb4");
+    assert_eq!(reg["token_endpoint_auth_method"], "none");
+
+    let rejected = server
+        .client
+        .post(server.url("/register"))
+        .json(&serde_json::json!({
+            "redirect_uris": ["https://attacker.example/cb"]
+        }))
+        .send()
+        .await
+        .expect("register");
+    assert_eq!(rejected.status(), 400);
+
+    let mcp = server.get("/mcp", None).await;
+    assert_eq!(mcp.status(), 401);
+}
+
+#[tokio::test]
+async fn unauthenticated_mcp_is_401() {
+    let server = TestServer::start_with(&[
+        ("OIDC_ISSUER", "https://login.microsoftonline.com/abc/v2.0"),
+        ("OIDC_AUDIENCE", "api://typst-mcp"),
+    ])
+    .await;
+    assert_eq!(server.get("/mcp", None).await.status(), 401);
+    assert_eq!(server.get("/health", None).await.status(), 200);
 }

@@ -20,8 +20,12 @@ origin-only metadata:
 | Origin probe | `/.well-known/oauth-protected-resource` (same document) |
 | 401 on `/mcp` | `WWW-Authenticate: Bearer resource_metadata="{origin}/.well-known/oauth-protected-resource/mcp"` |
 
-The server is a **resource server**. It validates Entra access tokens; it does
-not run an OAuth authorization-code proxy and has no `/oauth/callback`.
+The server validates Entra access tokens. Claude Desktop/Cowork insist on
+Dynamic Client Registration, so this process also fronts Entra: it serves
+RFC 8414 metadata with a `registration_endpoint`, a `/register` shim that
+hands out a pre-provisioned public SPA client, and same-origin `/authorize`
++ `/token` that proxy to Hanso Entra. Entra only ever sees
+`{origin}/oauth/callback`.
 
 ## Tools
 
@@ -60,6 +64,8 @@ OIDC is configured.
 | `TYPST_MCP_OIDC_AUDIENCE` | App ID URI or client id this server accepts as `aud`. Required when issuer is set. |
 | `TYPST_MCP_OIDC_TENANT_ID` | Optional directory GUID, checked against the token `tid`. |
 | `TYPST_MCP_OIDC_SCOPE` | Scope a token must carry. Default: `render`. |
+| `TYPST_MCP_DCR_CLIENT_ID` | Pre-provisioned Entra public SPA `client_id` returned by `/register`. |
+| `TYPST_MCP_OAUTH_REDIRECT_URIS` | Comma-separated exact redirect URIs the DCR shim and OAuth proxy accept. Required when DCR is set. Custom schemes are first-class; `http` is loopback-only. |
 | `TYPST_MCP_API_KEYS` | `name:secret,name:secret` for `/api/v1`. Not accepted on `/mcp`. |
 
 ### Common optional
