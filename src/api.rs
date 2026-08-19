@@ -218,11 +218,18 @@ async fn render(
     Json(request): Json<RenderRequest>,
 ) -> Response {
     let tenant = caller.tenant(&state);
-    match state.render.render(&tenant, &request).await {
-        Ok(result) => {
-            if query.output.as_deref() == Some("pdf") {
-                // The "just give me the file" path: one request, bytes in the response.
-                return (
+    match query.output.as_deref() {
+        None | Some("json") => match state.render.render(&tenant, &request).await {
+            Ok(result) => Json(result).into_response(),
+            Err(err) => render_error(err),
+        },
+        Some("pdf") => {
+            // Direct PDF is structurally no-store: it calls compile(), not render(),
+            // and asks the worker for no previews that would only be discarded.
+            let mut request = request;
+            request.preview_pages = Some(vec![]);
+            match state.render.compile(&tenant, &request).await {
+                Ok(result) => (
                     StatusCode::OK,
                     [
                         (header::CONTENT_TYPE, "application/pdf".to_owned()),
@@ -233,11 +240,18 @@ async fn render(
                     ],
                     result.pdf,
                 )
-                    .into_response();
+                    .into_response(),
+                Err(err) => render_error(err),
             }
-            Json(result).into_response()
         }
-        Err(err) => render_error(err),
+        Some(_) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "bad_request",
+                "message": "output must be `json` or `pdf`",
+            })),
+        )
+            .into_response(),
     }
 }
 

@@ -118,6 +118,28 @@ impl TestServer {
         std::fs::remove_file(tenant_dir.path().join("assets").join(id).join(name))
             .expect("remove asset bytes");
     }
+
+    async fn store_bytes(&self) -> u64 {
+        self.get("/health", None)
+            .await
+            .json::<serde_json::Value>()
+            .await
+            .expect("health json")["store_bytes"]
+            .as_u64()
+            .expect("store bytes")
+    }
+
+    fn compile_workspaces(&self) -> Vec<PathBuf> {
+        std::fs::read_dir(self._data.path().join("tmp"))
+            .expect("read tmp")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with("compile-"))
+            })
+            .collect()
+    }
 }
 
 #[tokio::test]
@@ -265,6 +287,8 @@ async fn rendering_the_hanso_template_returns_a_url_and_the_pdf() {
 async fn output_pdf_returns_the_bytes_directly() {
     // The "just give me the file" path a backend service would call.
     let server = TestServer::start().await;
+    let before = server.store_bytes().await;
+    assert!(server.compile_workspaces().is_empty());
     let response = server
         .post_json(
             "/api/v1/render?output=pdf",
@@ -276,6 +300,27 @@ async fn output_pdf_returns_the_bytes_directly() {
     assert_eq!(response.status(), 200);
     assert_eq!(response.headers()["content-type"], "application/pdf");
     assert!(response.bytes().await.expect("bytes").starts_with(b"%PDF-"));
+    assert_eq!(server.store_bytes().await, before);
+    assert!(
+        server.compile_workspaces().is_empty(),
+        "direct PDF must clean up its compile workspace"
+    );
+}
+
+#[tokio::test]
+async fn an_unknown_output_mode_is_rejected() {
+    let server = TestServer::start().await;
+    let response = server
+        .post_json(
+            "/api/v1/render?output=docx",
+            Some(ALICE),
+            serde_json::json!({ "source": "= Not DOCX" }),
+        )
+        .await;
+
+    assert_eq!(response.status(), 400);
+    let body: serde_json::Value = response.json().await.expect("json");
+    assert_eq!(body["error"], "bad_request");
 }
 
 #[tokio::test]

@@ -91,6 +91,15 @@ pub struct RenderedPreview {
     pub png: Vec<u8>,
 }
 
+/// A successful compile before any output is persisted.
+#[derive(Debug, Clone)]
+pub struct CompiledDocument {
+    pub pages: usize,
+    pub diagnostics: Vec<Diagnostic>,
+    pub pdf: Vec<u8>,
+    pub previews: Vec<RenderedPreview>,
+}
+
 /// Why a render did not produce a document.
 #[derive(Debug, Error)]
 pub enum RenderError {
@@ -176,12 +185,12 @@ impl RenderService {
         &self.config
     }
 
-    /// Render `request` for `tenant`, store the result, and return it.
-    pub async fn render(
+    /// Compile `request` without persisting any output.
+    pub async fn compile(
         &self,
         tenant: &TenantId,
         request: &RenderRequest,
-    ) -> Result<RenderResult, RenderError> {
+    ) -> Result<CompiledDocument, RenderError> {
         let (bundle, source_map) = self.assemble(tenant, request)?;
         let prepared = PreparedJob::stage(
             &self.config.data_dir.join("tmp"),
@@ -226,12 +235,33 @@ impl RenderService {
                     })
                     .collect();
 
-                self.store_result(tenant, outputs.pdf, pages, previews, diagnostics)
+                Ok(CompiledDocument {
+                    pages,
+                    diagnostics,
+                    pdf: outputs.pdf,
+                    previews,
+                })
             }
             JobResult::Internal => Err(RenderError::Protocol(
                 "compile worker could not process its staged files".into(),
             )),
         }
+    }
+
+    /// Compile `request`, persist the result, and return stored-document metadata.
+    pub async fn render(
+        &self,
+        tenant: &TenantId,
+        request: &RenderRequest,
+    ) -> Result<RenderResult, RenderError> {
+        let compiled = self.compile(tenant, request).await?;
+        self.store_result(
+            tenant,
+            compiled.pdf,
+            compiled.pages,
+            compiled.previews,
+            compiled.diagnostics,
+        )
     }
 
     /// Build the bundle, from a template or from caller-supplied files.

@@ -37,10 +37,11 @@ The deployed `v0.1.8` proves the core compile sandbox, Entra authentication, the
 same-origin DCR/OAuth bridge, tenant-scoped assets/outputs, signed links, Hanso rendering,
 and **seven** MCP tools. The eighth tool, `typst_upload_template`, is part of the target
 below but is not implemented yet. Ephemeral templates, REST template upload/delete,
-per-job uploaded fonts, bearer-authenticated downloads, true no-store `output=pdf`, unified
-HTTP/MCP errors, observability, the remaining three brands, and release smoke/soak gates
-are likewise completion work, not claims about `v0.1.8`. Current `main` has completed the
-path-only worker I/O checkpoint, but it is not production evidence until released.
+per-job uploaded fonts, bearer-authenticated downloads, unified HTTP/MCP errors,
+observability, the remaining three brands, and release smoke/soak gates are likewise
+completion work, not claims about `v0.1.8`. Current `main` has completed path-only worker
+I/O and true no-store direct-PDF checkpoints, but neither is production evidence until
+released.
 
 ## 2. Why in-process Typst rather than shelling out
 
