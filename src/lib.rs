@@ -15,6 +15,7 @@ pub mod bundle;
 pub mod compile;
 pub mod config;
 pub mod diagnostics;
+pub mod error;
 pub mod fonts;
 pub mod job_io;
 pub mod mcp;

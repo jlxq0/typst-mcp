@@ -35,3 +35,9 @@
   inheriting `TYPST_MCP_*`, cloud, or proxy variables turns a future compiler escape
   into credential exposure. Start from `env_clear()` and restore only the reviewed
   backtrace controls. Filesystem and network isolation remain separate boundaries.
+
+- **Classify a domain failure once, before choosing HTTP or MCP transport.** Separate
+  surface mappings made an oversized bundle a REST 422 while the specification required
+  413, and some MCP failures were returned as success-shaped JSON. Route auth, render,
+  bundle, template, store, link, upload, and download failures through `ApiError`; keep a
+  live REST/MCP parity test so status, code, message, and diagnostics cannot drift again.

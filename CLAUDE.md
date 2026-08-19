@@ -12,8 +12,9 @@ Specs in `.spec/`, ordered tasks in `Plan.md`, success criteria in `GOAL.md`.
   tool, not an existing route hidden in the docs.
 - Current `main` now has path-only worker control frames, parent-owned RAII job workspaces,
   and a compile-only no-store `output=pdf` path; deployed `v0.1.8` predates those changes.
-  OIDC bearer downloads, ephemeral template upload/delete, per-job uploaded fonts, unified
-  HTTP/MCP errors, metrics/OTLP/audit, and smoke/soak CI remain Plan completion gaps.
+  The same branch also has one sanitized HTTP/MCP domain-error mapping. OIDC bearer
+  downloads, ephemeral template upload/delete, per-job uploaded fonts, metrics/OTLP/audit,
+  and smoke/soak CI remain Plan completion gaps.
 - The live store is a 5 GiB ReadWriteOnce PVC on one replica with `Recreate` rollout. It
   survives pod replacement; TTL and LRU quotas govern content, and PVC capacity is the
   final disk bound. It is still a re-creatable cache, not durable business storage.
@@ -65,6 +66,11 @@ Specs in `.spec/`, ordered tasks in `Plan.md`, success criteria in `GOAL.md`.
   inheriting `TYPST_MCP_*`, cloud, or proxy variables turns a future compiler escape
   into credential exposure. Start from `env_clear()` and restore only the reviewed
   backtrace controls. Filesystem and network isolation remain separate boundaries.
+
+- **Classify domain failures before selecting a transport.** Duplicated REST and MCP
+  mappings let bundle caps return the wrong status and made some MCP failures look like
+  successes. Keep auth/render/bundle/template/store/link/upload/download failures behind
+  `ApiError` and retain the live REST/MCP envelope-parity regression.
   Found 2026-08-19.
 
 - **Typst's `FileId` interner is a permanently-leaked 16-bit counter.**

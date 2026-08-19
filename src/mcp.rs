@@ -25,8 +25,9 @@ use rmcp::service::RequestContext;
 
 use crate::auth::Authenticated;
 use crate::config::Config;
+use crate::error::ApiError;
 use crate::principal::TenantId;
-use crate::render::{RenderError, RenderRequest, RenderService};
+use crate::render::{RenderRequest, RenderService};
 use crate::store::Kind;
 use crate::templates::TemplateKind;
 
@@ -213,10 +214,8 @@ impl TypstMcp {
     ) -> Result<CallToolResult, McpError> {
         let Some(template) = self.render.templates().get(&args.template) else {
             // Naming the alternatives turns a dead end into a next step.
-            return json_result(serde_json::json!({
-                "error": "unknown_template",
-                "available": self.render.templates().names(),
-            }));
+            return ApiError::unknown_template(&args.template, &self.render.templates().names())
+                .into_mcp_result();
         };
         json_result(serde_json::json!({
             "name": template.name(),
@@ -281,10 +280,7 @@ impl TypstMcp {
             Ok((url, expires_at)) => {
                 json_result(serde_json::json!({ "url": url, "expires_at": expires_at }))
             }
-            Err(err) => json_result(serde_json::json!({
-                "error": "not_available",
-                "message": err.to_string(),
-            })),
+            Err(err) => ApiError::from(err).into_mcp_result(),
         }
     }
 
@@ -313,18 +309,9 @@ impl TypstMcp {
                 }
                 Ok(CallToolResult::success(blocks))
             }
-            // A document that failed to compile is not a tool error: the diagnostics
-            // are the useful result, and the model is expected to read them and try
-            // again. Reporting it as a protocol error would throw them away.
-            Err(err) => {
-                let body = serde_json::json!({
-                    "ok": false,
-                    "error": error_code(&err),
-                    "message": err.to_string(),
-                    "diagnostics": err.diagnostics(),
-                });
-                Ok(CallToolResult::error(vec![ContentBlock::json(body)?]))
-            }
+            // Domain failures are tool-error content, not JSON-RPC transport errors:
+            // the diagnostics remain available for the model to fix and retry.
+            Err(err) => ApiError::from(err).into_mcp_result(),
         }
     }
 }
@@ -357,20 +344,6 @@ fn kind_name(kind: TemplateKind) -> &'static str {
     match kind {
         TemplateKind::Wrapper => "wrapper",
         TemplateKind::Data => "data",
-    }
-}
-
-fn error_code(err: &RenderError) -> &'static str {
-    match err {
-        RenderError::UnknownTemplate { .. } => "unknown_template",
-        RenderError::Ambiguous | RenderError::Empty => "bad_request",
-        RenderError::Template(_) => "invalid_data",
-        RenderError::DuplicateAsset(_) | RenderError::Bundle(_) => "invalid_bundle",
-        RenderError::Compile { .. } => "compile_failed",
-        RenderError::Store(_) => "not_found",
-        RenderError::Spawn(crate::spawn::SpawnError::Timeout { .. }) => "timeout",
-        RenderError::Spawn(crate::spawn::SpawnError::Overloaded) => "overloaded",
-        RenderError::Spawn(_) | RenderError::Workspace(_) | RenderError::Protocol(_) => "internal",
     }
 }
 

@@ -46,7 +46,7 @@ impl AuthError {
     /// "unknown key" from "expired token" tells an attacker which guesses are closer.
     /// The `Unavailable` case is different: a caller hitting a door this deployment
     /// does not have needs to know that, and it reveals nothing about a secret.
-    fn message(self) -> &'static str {
+    pub(crate) fn message(self) -> &'static str {
         match self {
             Self::Missing => "this endpoint requires an Authorization: Bearer credential",
             Self::Malformed => "the Authorization header must be `Bearer <credential>`",
@@ -197,16 +197,7 @@ impl OidcAuth {
 
 /// A 401 with a `WWW-Authenticate` challenge.
 pub fn unauthorized(error: AuthError, challenge: &str) -> Response {
-    let body = serde_json::json!({
-        "error": "unauthorized",
-        "message": error.message(),
-    });
-    (
-        error.status(),
-        [(header::WWW_AUTHENTICATE, challenge)],
-        axum::Json(body),
-    )
-        .into_response()
+    crate::error::ApiError::auth(error, challenge).into_response()
 }
 
 /// Middleware for `/api/v1`: static key required.

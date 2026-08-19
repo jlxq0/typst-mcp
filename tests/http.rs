@@ -589,9 +589,9 @@ async fn oversized_asset_metadata_is_rejected_before_reading_asset_bytes() {
         )
         .await;
 
-    assert_eq!(response.status(), 422);
+    assert_eq!(response.status(), 413);
     let body: serde_json::Value = response.json().await.expect("json");
-    assert_eq!(body["error"], "invalid_bundle");
+    assert_eq!(body["error"], "payload_too_large");
     assert!(
         body["message"]
             .as_str()

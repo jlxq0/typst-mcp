@@ -12,13 +12,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::auth::{ApiKeyAuth, AuthError, Authenticated, OidcAuth, unauthorized};
 use crate::config::Config;
-use crate::diagnostics::Diagnostic;
+use crate::error::ApiError;
 use crate::oauth_metadata::{authorization_server_metadata, protected_resource_metadata, register};
 use crate::oauth_proxy::{self, OAuthProxyState};
 use crate::principal::TenantId;
-use crate::render::{DOCUMENT_NAME, RenderError, RenderRequest, RenderService};
+use crate::render::{DOCUMENT_NAME, RenderRequest, RenderService};
 use crate::signing::SignatureError;
-use crate::store::{Kind, Meta, StoreError};
+use crate::store::{Kind, Meta};
 use crate::templates::TemplateKind;
 
 /// Everything the handlers share.
@@ -221,7 +221,7 @@ async fn render(
     match query.output.as_deref() {
         None | Some("json") => match state.render.render(&tenant, &request).await {
             Ok(result) => Json(result).into_response(),
-            Err(err) => render_error(err),
+            Err(err) => ApiError::from(err).into_response(),
         },
         Some("pdf") => {
             // Direct PDF is structurally no-store: it calls compile(), not render(),
@@ -241,70 +241,11 @@ async fn render(
                     result.pdf,
                 )
                     .into_response(),
-                Err(err) => render_error(err),
+                Err(err) => ApiError::from(err).into_response(),
             }
         }
-        Some(_) => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": "bad_request",
-                "message": "output must be `json` or `pdf`",
-            })),
-        )
-            .into_response(),
+        Some(_) => ApiError::bad_request("output must be `json` or `pdf`").into_response(),
     }
-}
-
-/// Map a render failure onto a status and a body.
-///
-/// A failed *document* is 422 with diagnostics — the diagnostics are the product in
-/// that case, and the caller fixes their input and retries. Only an actual server
-/// fault is a 5xx.
-fn render_error(err: RenderError) -> Response {
-    let diagnostics = err.diagnostics().to_vec();
-    let (status, code) = match &err {
-        RenderError::UnknownTemplate { .. } => (StatusCode::NOT_FOUND, "unknown_template"),
-        RenderError::Ambiguous | RenderError::Empty => (StatusCode::BAD_REQUEST, "bad_request"),
-        RenderError::Template(_) => (StatusCode::UNPROCESSABLE_ENTITY, "invalid_data"),
-        RenderError::DuplicateAsset(_) | RenderError::Bundle(_) => {
-            (StatusCode::UNPROCESSABLE_ENTITY, "invalid_bundle")
-        }
-        RenderError::Compile { .. } => (StatusCode::UNPROCESSABLE_ENTITY, "compile_failed"),
-        RenderError::Store(e) => return store_error(e),
-        RenderError::Spawn(crate::spawn::SpawnError::Timeout { .. }) => {
-            (StatusCode::GATEWAY_TIMEOUT, "timeout")
-        }
-        RenderError::Spawn(crate::spawn::SpawnError::Overloaded) => {
-            (StatusCode::SERVICE_UNAVAILABLE, "overloaded")
-        }
-        RenderError::Spawn(_) | RenderError::Workspace(_) | RenderError::Protocol(_) => {
-            (StatusCode::INTERNAL_SERVER_ERROR, "internal")
-        }
-    };
-
-    let mut body = serde_json::json!({ "error": code, "message": err.to_string() });
-    if !diagnostics.is_empty() {
-        body["diagnostics"] = serde_json::to_value(&diagnostics).unwrap_or_default();
-    }
-    (status, Json(body)).into_response()
-}
-
-fn store_error(err: &StoreError) -> Response {
-    let (status, code) = match err {
-        // Expired is deliberately not 404: a caller told "not found" retries the same
-        // id forever, where "expired" tells it to produce the thing again.
-        StoreError::Expired { .. } => (StatusCode::GONE, "expired"),
-        StoreError::NotFound { .. } | StoreError::BadId { .. } => {
-            (StatusCode::NOT_FOUND, "not_found")
-        }
-        StoreError::TenantFull { .. } => (StatusCode::INSUFFICIENT_STORAGE, "quota_exceeded"),
-        StoreError::Io { .. } => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
-    };
-    (
-        status,
-        Json(serde_json::json!({ "error": code, "message": err.to_string() })),
-    )
-        .into_response()
 }
 
 // -- templates ------------------------------------------------------------------
@@ -342,13 +283,7 @@ async fn list_templates(State(state): State<AppState>) -> Json<serde_json::Value
 
 async fn get_template(State(state): State<AppState>, Path(name): Path<String>) -> Response {
     let Some(template) = state.render.templates().get(&name) else {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({
-                "error": "unknown_template",
-                "available": state.render.templates().names(),
-            })),
-        )
+        return ApiError::unknown_template(&name, &state.render.templates().names())
             .into_response();
     };
 
@@ -387,11 +322,7 @@ async fn upload_asset(
     let path = match crate::bundle::normalise_path(&query.path) {
         Ok(path) => path,
         Err(err) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": "bad_path", "message": err.to_string() })),
-            )
-                .into_response();
+            return ApiError::invalid_path(err.to_string()).into_response();
         }
     };
 
@@ -420,7 +351,7 @@ async fn upload_asset(
             "expires_at": entry.expires_at,
         }))
         .into_response(),
-        Err(err) => store_error(&err),
+        Err(err) => ApiError::from(err).into_response(),
     }
 }
 
@@ -481,7 +412,7 @@ async fn create_link(
         Ok((url, expires_at)) => {
             Json(serde_json::json!({ "url": url, "expires_at": expires_at })).into_response()
         }
-        Err(err) => render_error(err),
+        Err(err) => ApiError::from(err).into_response(),
     }
 }
 
@@ -517,13 +448,7 @@ async fn download(
         ) {
             Ok(()) => {}
             Err(SignatureError::Expired) => {
-                return (
-                    StatusCode::GONE,
-                    Json(serde_json::json!({
-                        "error": "expired",
-                        "message": "this link has expired; request a fresh one",
-                    })),
-                )
+                return ApiError::expired("this link has expired; request a fresh one")
                     .into_response();
             }
             // An invalid or absent signature is indistinguishable from a wrong id on
@@ -551,16 +476,12 @@ async fn download(
             )
                 .into_response()
         }
-        Err(err) => store_error(&err),
+        Err(err) => ApiError::from(err).into_response(),
     }
 }
 
 fn not_found() -> Response {
-    (
-        StatusCode::NOT_FOUND,
-        Json(serde_json::json!({ "error": "not_found" })),
-    )
-        .into_response()
+    ApiError::not_found("the requested resource was not found").into_response()
 }
 
 // -- extractor ------------------------------------------------------------------
@@ -590,12 +511,6 @@ impl<S: Send + Sync> axum::extract::FromRequestParts<S> for Caller {
                 .ok_or_else(|| unauthorized(AuthError::Missing, "Bearer"))
         }
     }
-}
-
-/// Diagnostics as returned by the API.
-#[derive(Serialize)]
-pub struct DiagnosticsBody {
-    pub diagnostics: Vec<Diagnostic>,
 }
 
 fn now() -> u64 {

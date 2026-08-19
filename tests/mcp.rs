@@ -24,6 +24,7 @@ const SALT: &str = "0123456789abcdef0123456789abcdef";
 const AUDIENCE: &str = "api://typst-mcp";
 const DIRECTORY: &str = "test-directory-id";
 const KID: &str = "test-key-1";
+const API_KEY: &str = "sk_alice_0123456789abcdef0123456789abcdef";
 
 /// The protocol revision these tests speak, matching what the server advertises.
 const PROTOCOL: &str = "2026-07-28";
@@ -323,6 +324,11 @@ fn images_in(result: &serde_json::Value) -> Vec<&serde_json::Value> {
         .unwrap_or_default()
 }
 
+fn error_envelope_of(result: &serde_json::Value) -> serde_json::Value {
+    assert_eq!(result["isError"], true, "{result}");
+    serde_json::from_str(&text_of(result)).expect("tool error envelope")
+}
+
 #[tokio::test]
 async fn mcp_is_not_mounted_without_oidc() {
     // An MCP endpoint on static keys would put a long-lived shared secret into a
@@ -576,6 +582,44 @@ async fn a_broken_document_returns_diagnostics_rather_than_a_protocol_error() {
     assert!(text.contains("diagnostics"), "{text}");
     assert!(text.contains("main.typ"), "{text}");
     assert!(text.contains("line"), "{text}");
+}
+
+#[tokio::test]
+async fn rest_and_mcp_share_the_same_compile_error_envelope() {
+    let server = TestServer::start().await;
+    let source = "= Fine\n\n#let broken =";
+
+    let rest = server
+        .client
+        .post(format!("{}/api/v1/compile", server.base))
+        .bearer_auth(API_KEY)
+        .json(&serde_json::json!({ "source": source }))
+        .send()
+        .await
+        .expect("REST request");
+    assert_eq!(rest.status(), 422);
+    let rest: serde_json::Value = rest.json().await.expect("REST envelope");
+
+    let token = server.idp.token("alice");
+    let mcp = server
+        .call(
+            &token,
+            "tools/call",
+            serde_json::json!({
+                "name": "typst_compile",
+                "arguments": { "source": source },
+            }),
+        )
+        .await;
+    let mcp = error_envelope_of(&mcp);
+
+    assert_eq!(mcp, rest);
+    assert_eq!(rest["error"], "compile_failed");
+    assert!(
+        rest["diagnostics"]
+            .as_array()
+            .is_some_and(|d| !d.is_empty())
+    );
 }
 
 #[tokio::test]
