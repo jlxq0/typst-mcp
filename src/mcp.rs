@@ -365,7 +365,7 @@ fn error_code(err: &RenderError) -> &'static str {
         RenderError::UnknownTemplate { .. } => "unknown_template",
         RenderError::Ambiguous | RenderError::Empty => "bad_request",
         RenderError::Template(_) => "invalid_data",
-        RenderError::Bundle(_) => "invalid_bundle",
+        RenderError::DuplicateAsset(_) | RenderError::Bundle(_) => "invalid_bundle",
         RenderError::Compile { .. } => "compile_failed",
         RenderError::Store(_) => "not_found",
         RenderError::Spawn(crate::spawn::SpawnError::Timeout { .. }) => "timeout",

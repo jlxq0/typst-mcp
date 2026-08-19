@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 use typst_mcp::config::Config;
 use typst_mcp::server::Server;
 
-const ALICE: &str = "sk_alice_0123456789abcdef";
-const BOB: &str = "sk_bob_0123456789abcdef";
+const ALICE: &str = "sk_alice_0123456789abcdef0123456789abcdef";
+const BOB: &str = "sk_bob_0123456789abcdef0123456789abcdef";
 const SALT: &str = "0123456789abcdef0123456789abcdef";
 
 fn repo(rel: &str) -> PathBuf {
@@ -107,6 +107,16 @@ impl TestServer {
             request = request.bearer_auth(key);
         }
         request.send().await.expect("request")
+    }
+
+    fn remove_asset_bytes(&self, id: &str, name: &str) {
+        let tenant_dir = std::fs::read_dir(self._data.path())
+            .expect("read data dir")
+            .filter_map(Result::ok)
+            .find(|entry| entry.file_name().to_string_lossy().starts_with("t_"))
+            .expect("tenant dir");
+        std::fs::remove_file(tenant_dir.path().join("assets").join(id).join(name))
+            .expect("remove asset bytes");
     }
 }
 
@@ -466,6 +476,83 @@ async fn an_asset_can_be_uploaded_and_used_in_a_document() {
         )
         .await;
     assert_eq!(response.status(), 200, "{:?}", response.text().await);
+}
+
+#[tokio::test]
+async fn repeated_asset_ids_are_rejected_before_reading_asset_bytes() {
+    let server = TestServer::start().await;
+    let uploaded: serde_json::Value = server
+        .client
+        .post(server.url("/api/v1/assets?path=payload.bin"))
+        .bearer_auth(ALICE)
+        .body("asset bytes")
+        .send()
+        .await
+        .expect("upload")
+        .json()
+        .await
+        .expect("json");
+    let id = uploaded["id"].as_str().expect("id");
+
+    // Leave the metadata indexed but remove the content. A duplicate-id error proves
+    // the whole request was validated before the first asset file was read.
+    server.remove_asset_bytes(id, "payload.bin");
+    let response = server
+        .post_json(
+            "/api/v1/render",
+            Some(ALICE),
+            serde_json::json!({
+                "source": "= Document",
+                "assets": [id, id],
+            }),
+        )
+        .await;
+
+    assert_eq!(response.status(), 422);
+    let body: serde_json::Value = response.json().await.expect("json");
+    assert_eq!(body["error"], "invalid_bundle");
+    assert!(body["message"].as_str().expect("message").contains(id));
+}
+
+#[tokio::test]
+async fn oversized_asset_metadata_is_rejected_before_reading_asset_bytes() {
+    let server = TestServer::start_with(&[("MAX_BUNDLE_BYTES", "4")]).await;
+    let uploaded: serde_json::Value = server
+        .client
+        .post(server.url("/api/v1/assets?path=payload.bin"))
+        .bearer_auth(ALICE)
+        .body("eight123")
+        .send()
+        .await
+        .expect("upload")
+        .json()
+        .await
+        .expect("json");
+    let id = uploaded["id"].as_str().expect("id");
+
+    // As above, a bundle-size error instead of a store read error proves metadata was
+    // accumulated and checked before loading any content into the parent process.
+    server.remove_asset_bytes(id, "payload.bin");
+    let response = server
+        .post_json(
+            "/api/v1/render",
+            Some(ALICE),
+            serde_json::json!({
+                "source": "= Document",
+                "assets": [id],
+            }),
+        )
+        .await;
+
+    assert_eq!(response.status(), 422);
+    let body: serde_json::Value = response.json().await.expect("json");
+    assert_eq!(body["error"], "invalid_bundle");
+    assert!(
+        body["message"]
+            .as_str()
+            .expect("message")
+            .contains("limit is 4")
+    );
 }
 
 #[tokio::test]

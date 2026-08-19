@@ -14,6 +14,10 @@ use crate::protocol::{Job, JobResult, read_frame, write_frame};
 /// The argument that puts this binary into worker mode.
 pub const WORKER_FLAG: &str = "--compile-worker";
 
+/// Operational controls that are safe and useful inside an isolated worker. Auth,
+/// signing, cloud, proxy and application configuration are deliberately absent.
+const WORKER_ENV_ALLOWLIST: &[&str] = &["RUST_BACKTRACE", "RUST_LIB_BACKTRACE"];
+
 /// How the parent is configured.
 #[derive(Debug, Clone)]
 pub struct SpawnConfig {
@@ -79,15 +83,16 @@ impl CompileService {
     pub async fn compile(&self, job: &Job) -> Result<JobResult, SpawnError> {
         let _permit = self.acquire().await?;
 
-        let mut child = Command::new(&self.config.exe)
+        let mut command = worker_command(&self.config.exe);
+        command
             .arg(WORKER_FLAG)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             // Belt and braces: if this future is dropped (client hung up, runtime shut
             // down), the child must not outlive it.
-            .kill_on_drop(true)
-            .spawn()?;
+            .kill_on_drop(true);
+        let mut child = command.spawn()?;
 
         let mut stdin = child.stdin.take().expect("stdin was piped");
         let mut stdout = child.stdout.take().expect("stdout was piped");
@@ -176,9 +181,56 @@ impl CompileService {
     }
 }
 
+/// Build a worker command from a closed environment, then restore the tiny explicit
+/// operational allowlist. The binary and every compile input travel through arguments
+/// or the framed stdin protocol, so the worker needs no application configuration.
+fn worker_command(exe: &std::path::Path) -> Command {
+    let mut command = Command::new(exe);
+    command.env_clear();
+    for name in WORKER_ENV_ALLOWLIST {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
+    }
+    command
+}
+
 fn describe(status: &std::process::ExitStatus) -> String {
     match status.code() {
         Some(code) => format!("exit code {code}"),
         None => "killed by signal".to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn worker_child_receives_only_the_explicit_environment_allowlist() {
+        // `/usr/bin/env -0` reports the environment of the actual spawned child, so
+        // this tests command construction rather than a parallel reimplementation.
+        let mut command = worker_command(std::path::Path::new("/usr/bin/env"));
+        let output = command.arg("-0").output().await.expect("run env");
+        assert!(output.status.success());
+
+        for entry in output
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter(|e| !e.is_empty())
+        {
+            let name = entry
+                .split(|byte| *byte == b'=')
+                .next()
+                .expect("environment name");
+            assert!(
+                WORKER_ENV_ALLOWLIST
+                    .iter()
+                    .any(|allowed| name == allowed.as_bytes()),
+                "unexpected worker environment variable {:?}",
+                String::from_utf8_lossy(name)
+            );
+        }
     }
 }

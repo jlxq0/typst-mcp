@@ -79,7 +79,7 @@ OIDC is configured.
 | `TYPST_MCP_OIDC_SCOPE` | Scope a token must carry. Default: `render`. |
 | `TYPST_MCP_DCR_CLIENT_ID` | Pre-provisioned Entra public SPA `client_id` returned by `/register`. |
 | `TYPST_MCP_OAUTH_REDIRECT_URIS` | Comma-separated exact redirect URIs the DCR shim and OAuth proxy accept. Required when DCR is set. Custom schemes are first-class; `http` is loopback-only. |
-| `TYPST_MCP_API_KEYS` | `name:secret,name:secret` for `/api/v1`. Not accepted on `/mcp`. |
+| `TYPST_MCP_API_KEYS` | `name:secret,name:secret` for `/api/v1`; each secret must be at least 32 bytes and labels must be unique. Not accepted on `/mcp`. |
 
 ### Common optional
 
@@ -130,7 +130,7 @@ Rust 1.93+ with `edition = "2024"`.
 export TYPST_MCP_PUBLIC_URL=http://127.0.0.1:3000
 export TYPST_MCP_TENANT_SALT=0123456789abcdef0123456789abcdef
 export TYPST_MCP_SIGNING_SECRET=0123456789abcdef0123456789abcdef
-export TYPST_MCP_API_KEYS=dev:sk_dev_0123456789abcdef
+export TYPST_MCP_API_KEYS=dev:sk_dev_0123456789abcdef0123456789abcdef
 export TYPST_MCP_TEMPLATE_DIR=./templates
 export TYPST_MCP_FONT_DIRS=./fonts
 export TYPST_MCP_DATA_DIR=./data

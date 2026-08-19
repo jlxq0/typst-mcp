@@ -28,6 +28,7 @@ use crate::oauth_redirect::is_allowed_redirect_uri;
 #[allow(clippy::duration_suboptimal_units)]
 const PENDING_TTL: Duration = Duration::from_secs(600);
 const PENDING_CAP: usize = 2048;
+const MAX_CLIENT_STATE_BYTES: usize = 4096;
 
 #[derive(Clone)]
 pub struct OAuthProxyState {
@@ -79,14 +80,20 @@ impl OAuthProxyState {
         }
     }
 
-    fn insert(&self, state: String, pending: Pending) {
-        if let Ok(mut g) = self.inner.pending.lock() {
+    /// Insert one pending authorization without ever exceeding the hard capacity.
+    fn insert(&self, state: String, pending: Pending) -> bool {
+        let Ok(mut g) = self.inner.pending.lock() else {
+            return false;
+        };
+        if g.len() >= PENDING_CAP {
+            let now = Instant::now();
+            g.retain(|_, p| now.duration_since(p.created) < PENDING_TTL);
             if g.len() >= PENDING_CAP {
-                let now = Instant::now();
-                g.retain(|_, p| now.duration_since(p.created) < PENDING_TTL);
+                return false;
             }
-            g.insert(state, pending);
         }
+        g.insert(state, pending);
+        true
     }
 
     fn take(&self, state: &str) -> Option<Pending> {
@@ -168,16 +175,28 @@ pub async fn authorize(State(st): State<OAuthProxyState>, RawQuery(q): RawQuery)
         .iter()
         .find(|(k, _)| k == "state")
         .map(|(_, v)| v.clone());
+    if client_state
+        .as_ref()
+        .is_some_and(|state| state.len() > MAX_CLIENT_STATE_BYTES)
+    {
+        return (StatusCode::BAD_REQUEST, "state is too long\n").into_response();
+    }
 
     let proxy_state = random_state();
-    st.insert(
+    if !st.insert(
         proxy_state.clone(),
         Pending {
             client_redirect_uri,
             client_state,
             created: Instant::now(),
         },
-    );
+    ) {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "too many pending authorizations; retry later\n",
+        )
+            .into_response();
+    }
 
     let mut saw_state = false;
     let mut saw_scope = false;
@@ -338,6 +357,14 @@ mod tests {
         )
     }
 
+    fn pending(created: Instant) -> Pending {
+        Pending {
+            client_redirect_uri: "https://claude.ai/api/mcp/auth_callback".to_owned(),
+            client_state: Some("client-state".to_owned()),
+            created,
+        }
+    }
+
     #[test]
     fn entra_urls_and_callback_are_derived() {
         let st = state();
@@ -393,6 +420,66 @@ mod tests {
         )
         .await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn pending_table_never_exceeds_its_cap() {
+        let st = state();
+        for n in 0..PENDING_CAP {
+            assert!(st.insert(format!("proxy-state-{n}"), pending(Instant::now())));
+        }
+        assert!(!st.insert("overflow".to_owned(), pending(Instant::now())));
+
+        assert_eq!(st.inner.pending.lock().unwrap().len(), PENDING_CAP);
+    }
+
+    #[test]
+    fn pending_table_reclaims_expired_entries_at_capacity() {
+        let st = state();
+        let expired = Instant::now() - PENDING_TTL;
+        for n in 0..PENDING_CAP {
+            assert!(st.insert(format!("expired-{n}"), pending(expired)));
+        }
+
+        assert!(st.insert("fresh".to_owned(), pending(Instant::now())));
+        let g = st.inner.pending.lock().unwrap();
+        assert_eq!(g.len(), 1);
+        assert!(g.contains_key("fresh"));
+    }
+
+    #[tokio::test]
+    async fn authorize_rejects_oversized_client_state_without_storing_it() {
+        let st = state();
+        let oversized = "x".repeat(4097);
+        let query = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("client_id", "abc")
+            .append_pair("redirect_uri", "https://claude.ai/api/mcp/auth_callback")
+            .append_pair("response_type", "code")
+            .append_pair("state", &oversized)
+            .finish();
+        let response = authorize(State(st.clone()), RawQuery(Some(query))).await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(st.inner.pending.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn authorize_returns_unavailable_when_pending_table_is_full() {
+        let st = state();
+        for n in 0..PENDING_CAP {
+            assert!(st.insert(format!("proxy-state-{n}"), pending(Instant::now())));
+        }
+        let response = authorize(
+            State(st.clone()),
+            RawQuery(Some(
+                "client_id=abc&redirect_uri=https%3A%2F%2Fclaude.ai%2Fapi%2Fmcp%2Fauth_callback&response_type=code"
+                    .to_owned(),
+            )),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(st.inner.pending.lock().unwrap().len(), PENDING_CAP);
     }
 
     #[tokio::test]

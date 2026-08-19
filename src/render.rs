@@ -4,13 +4,14 @@
 //! tools and the REST endpoints cannot drift apart in what they validate, what they
 //! store, or what they report.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::bundle::{Bundle, BundleFile, FileContent};
+use crate::bundle::{Bundle, BundleError, BundleFile, FileContent, MAX_FILES};
 use crate::config::Config;
 use crate::diagnostics::Diagnostic;
 use crate::principal::TenantId;
@@ -98,6 +99,8 @@ pub enum RenderError {
     Ambiguous,
     #[error("nothing to render: provide `template`, `source`, or `files`")]
     Empty,
+    #[error("duplicate asset id {0:?}")]
+    DuplicateAsset(String),
     #[error(transparent)]
     Template(#[from] TemplateError),
     #[error(transparent)]
@@ -274,12 +277,39 @@ impl RenderService {
         tenant: &TenantId,
         ids: &[String],
     ) -> Result<Vec<BundleFile>, RenderError> {
-        ids.iter()
-            .map(|id| {
-                // Scoped to this tenant: an id belonging to someone else simply is not
-                // found, which is the isolation working rather than a check.
-                let entry = self.store.entry(tenant, Kind::Asset, id)?;
-                let name = entry.filename.clone().unwrap_or_else(|| id.clone());
+        // Preflight the complete caller-controlled list using metadata only. Reading as
+        // we iterate would let repeated ids allocate the same large file without bound
+        // before Bundle::new sees the duplicate path or enforces its aggregate limits.
+        if ids.len() > MAX_FILES {
+            return Err(BundleError::TooManyFiles { count: ids.len() }.into());
+        }
+
+        let mut seen = HashSet::with_capacity(ids.len());
+        let mut total_bytes = 0_u64;
+        let mut entries = Vec::with_capacity(ids.len());
+        for id in ids {
+            if !seen.insert(id.as_str()) {
+                return Err(RenderError::DuplicateAsset(id.clone()));
+            }
+
+            // Scoped to this tenant: an id belonging to someone else simply is not
+            // found, which is the isolation working rather than a check.
+            let entry = self.store.entry(tenant, Kind::Asset, id)?;
+            total_bytes = total_bytes.saturating_add(entry.bytes);
+            if total_bytes > self.config.max_bundle_bytes as u64 {
+                return Err(BundleError::TooLarge {
+                    actual: usize::try_from(total_bytes).unwrap_or(usize::MAX),
+                    limit: self.config.max_bundle_bytes,
+                }
+                .into());
+            }
+            entries.push((id, entry));
+        }
+
+        entries
+            .into_iter()
+            .map(|(id, entry)| {
+                let name = entry.filename.unwrap_or_else(|| id.clone());
                 let bytes = self.store.get(tenant, Kind::Asset, id, &name)?;
                 Ok(BundleFile {
                     path: name,

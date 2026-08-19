@@ -7,15 +7,22 @@
 //! derivation is an HMAC rather than a bare hash so that an identifier appearing in a
 //! log does not also reveal the directory it maps to.
 
+use std::collections::HashSet;
 use std::fmt;
 
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
+use thiserror::Error;
 use zeroize::Zeroizing;
 
 /// Length of a derived tenant id, in base32 characters.
 const TENANT_LEN: usize = 16;
+
+/// Static API keys are long-lived credentials and need the same minimum as other
+/// configured secrets.
+pub const MIN_API_KEY_BYTES: usize = 32;
+const MAX_API_KEY_LABEL_BYTES: usize = 64;
 
 /// Crockford base32 without the ambiguous letters, so an id can be read aloud and
 /// typed back without I/L/O/U confusion.
@@ -140,26 +147,36 @@ pub struct ApiKey {
 }
 
 impl ApiKey {
-    /// Parse a `label:secret` or bare `secret` entry.
-    pub fn parse(entry: &str) -> Option<Self> {
+    /// Parse one required `label:secret` entry without ever echoing the secret in an
+    /// error.
+    fn parse(entry: &str, position: usize) -> Result<Self, ApiKeyConfigError> {
         let entry = entry.trim();
         if entry.is_empty() {
-            return None;
+            return Err(ApiKeyConfigError::EmptyEntry { position });
         }
-        let (label, secret) = match entry.split_once(':') {
-            Some((label, secret)) if !label.is_empty() && !secret.is_empty() => (label, secret),
-            // A bare key still needs a stable label, and the fingerprint is the only
-            // thing available that is not the secret itself.
-            _ => ("", entry),
-        };
+        let (label, secret) = entry
+            .split_once(':')
+            .ok_or(ApiKeyConfigError::Malformed { position })?;
+        if label.is_empty()
+            || secret.is_empty()
+            || label.trim() != label
+            || secret.trim() != secret
+            || label.len() > MAX_API_KEY_LABEL_BYTES
+            || !label
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+        {
+            return Err(ApiKeyConfigError::Malformed { position });
+        }
+        if secret.len() < MIN_API_KEY_BYTES {
+            return Err(ApiKeyConfigError::SecretTooShort {
+                position,
+                actual: secret.len(),
+            });
+        }
         let fingerprint = fingerprint(secret);
-        let label = if label.is_empty() {
-            format!("key-{}", &fingerprint[..8])
-        } else {
-            label.to_owned()
-        };
-        Some(Self {
-            label,
+        Ok(Self {
+            label: label.to_owned(),
             secret: Zeroizing::new(secret.to_owned()),
             fingerprint,
         })
@@ -190,6 +207,19 @@ impl ApiKey {
     }
 }
 
+/// A safe-to-log API-key configuration error. Secret values are never retained.
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum ApiKeyConfigError {
+    #[error("entry {position} is empty")]
+    EmptyEntry { position: usize },
+    #[error("entry {position} must be `label:secret` with a simple non-empty label")]
+    Malformed { position: usize },
+    #[error("entry {position} secret must be at least {MIN_API_KEY_BYTES} bytes; it is {actual}")]
+    SecretTooShort { position: usize, actual: usize },
+    #[error("duplicate label {label:?}")]
+    DuplicateLabel { label: String },
+}
+
 impl fmt::Debug for ApiKey {
     /// Never prints the secret. A key that reaches a log through a stray `{:?}` is
     /// exactly as compromised as one that was printed on purpose.
@@ -209,10 +239,23 @@ pub struct ApiKeys {
 
 impl ApiKeys {
     /// Parse a comma-separated `TYPST_MCP_API_KEYS` value.
-    pub fn parse(value: &str) -> Self {
-        Self {
-            keys: value.split(',').filter_map(ApiKey::parse).collect(),
+    pub fn parse(value: &str) -> Result<Self, ApiKeyConfigError> {
+        if value.trim().is_empty() {
+            return Ok(Self::default());
         }
+
+        let mut labels = HashSet::new();
+        let mut keys = Vec::new();
+        for (index, entry) in value.split(',').enumerate() {
+            let key = ApiKey::parse(entry, index + 1)?;
+            if !labels.insert(key.label.clone()) {
+                return Err(ApiKeyConfigError::DuplicateLabel {
+                    label: key.label.clone(),
+                });
+            }
+            keys.push(key);
+        }
+        Ok(Self { keys })
     }
 
     /// Find the key matching `presented`.
@@ -252,6 +295,9 @@ mod tests {
     use super::*;
 
     const SALT: &[u8] = b"a-test-salt-of-at-least-32-bytes!!";
+    const KEY_ONE: &str = "sk_11111111111111111111111111111111";
+    const KEY_TWO: &str = "sk_22222222222222222222222222222222";
+    const KEY_THREE: &str = "sk_33333333333333333333333333333333";
 
     fn user(subject: &str) -> Principal {
         Principal::User {
@@ -353,34 +399,58 @@ mod tests {
     }
 
     #[test]
-    fn api_keys_parse_with_and_without_labels() {
-        let keys = ApiKeys::parse("alice:sk_one,sk_two, bob:sk_three ");
+    fn api_keys_parse_labelled_entries() {
+        let keys = ApiKeys::parse(&format!(
+            "alice:{KEY_ONE},service-2:{KEY_TWO},bob:{KEY_THREE}"
+        ))
+        .expect("valid keys");
         assert_eq!(keys.len(), 3);
         assert_eq!(keys.labels()[0], "alice");
-        // A bare key gets a stable label derived from its fingerprint, not its bytes.
-        assert!(keys.labels()[1].starts_with("key-"));
-        assert!(!keys.labels()[1].contains("sk_two"));
+        assert_eq!(keys.labels()[1], "service-2");
         assert_eq!(keys.labels()[2], "bob");
     }
 
     #[test]
-    fn empty_and_malformed_entries_are_skipped() {
-        let keys = ApiKeys::parse(",,alice:,:sk_x,  ,alice:sk_ok");
-        // `alice:` has no secret and `:sk_x` has no label, so both fall back to the
-        // bare-key branch; only genuinely empty entries disappear.
-        assert!(!keys.is_empty());
-        assert!(keys.authenticate("sk_ok").is_some());
-        assert!(keys.authenticate("").is_none());
+    fn malformed_entries_and_bare_keys_are_rejected() {
+        for value in [
+            "alice:",
+            ":sk_11111111111111111111111111111111",
+            "sk_11111111111111111111111111111111",
+            "alice:sk_11111111111111111111111111111111,",
+            "bad label:sk_11111111111111111111111111111111",
+        ] {
+            assert!(ApiKeys::parse(value).is_err(), "{value:?} was accepted");
+        }
+    }
+
+    #[test]
+    fn short_keys_and_duplicate_labels_are_rejected() {
+        assert_eq!(
+            ApiKeys::parse("alice:short").unwrap_err(),
+            ApiKeyConfigError::SecretTooShort {
+                position: 1,
+                actual: 5
+            }
+        );
+        assert_eq!(
+            ApiKeys::parse(&format!("alice:{KEY_ONE},alice:{KEY_TWO}")).unwrap_err(),
+            ApiKeyConfigError::DuplicateLabel {
+                label: "alice".to_owned()
+            }
+        );
     }
 
     #[test]
     fn authentication_accepts_only_an_exact_key() {
-        let keys = ApiKeys::parse("alice:sk_secret");
-        assert_eq!(
-            keys.authenticate("sk_secret").map(ApiKey::label),
-            Some("alice")
-        );
-        for wrong in ["sk_secre", "sk_secrett", "SK_SECRET", "", "sk_secret "] {
+        let keys = ApiKeys::parse(&format!("alice:{KEY_ONE}")).expect("valid key");
+        assert_eq!(keys.authenticate(KEY_ONE).map(ApiKey::label), Some("alice"));
+        for wrong in [
+            KEY_TWO,
+            "sk_1111111111111111111111111111111",
+            "SK_11111111111111111111111111111111",
+            "",
+            "sk_11111111111111111111111111111111 ",
+        ] {
             assert!(
                 keys.authenticate(wrong).is_none(),
                 "{wrong:?} must not authenticate"
@@ -390,7 +460,7 @@ mod tests {
 
     #[test]
     fn an_empty_key_set_authenticates_nothing() {
-        let keys = ApiKeys::parse("");
+        let keys = ApiKeys::parse("").expect("empty set");
         assert!(keys.is_empty());
         assert!(keys.authenticate("").is_none());
         assert!(keys.authenticate("anything").is_none());
@@ -398,9 +468,9 @@ mod tests {
 
     #[test]
     fn keys_never_print_their_secret() {
-        let keys = ApiKeys::parse("alice:sk_super_secret");
+        let keys = ApiKeys::parse(&format!("alice:{KEY_ONE}")).expect("valid key");
         let rendered = format!("{keys:?}");
-        assert!(!rendered.contains("sk_super_secret"), "{rendered}");
+        assert!(!rendered.contains(KEY_ONE), "{rendered}");
         assert!(rendered.contains("alice"), "{rendered}");
     }
 

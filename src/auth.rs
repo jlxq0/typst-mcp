@@ -243,6 +243,9 @@ pub async fn require_oidc(
 mod tests {
     use super::*;
 
+    const ALICE_KEY: &str = "sk_alice_0123456789abcdef0123456789abcdef";
+    const BOB_KEY: &str = "sk_bob_0123456789abcdef0123456789abcdef";
+
     fn headers(value: Option<&str>) -> HeaderMap {
         let mut headers = HeaderMap::new();
         if let Some(value) = value {
@@ -252,13 +255,15 @@ mod tests {
     }
 
     fn auth() -> ApiKeyAuth {
-        ApiKeyAuth::new(ApiKeys::parse("alice:sk_alice,bob:sk_bob"))
+        ApiKeyAuth::new(
+            ApiKeys::parse(&format!("alice:{ALICE_KEY},bob:{BOB_KEY}")).expect("valid test keys"),
+        )
     }
 
     #[test]
     fn a_valid_key_authenticates_as_its_label() {
         let result = auth()
-            .authenticate(&headers(Some("Bearer sk_bob")))
+            .authenticate(&headers(Some(&format!("Bearer {BOB_KEY}"))))
             .expect("accepted");
         assert_eq!(
             result.principal,
@@ -272,9 +277,13 @@ mod tests {
     #[test]
     fn the_scheme_is_case_insensitive() {
         // RFC 7235 says the scheme is case-insensitive, and clients do vary.
-        for value in ["Bearer sk_bob", "bearer sk_bob", "BEARER sk_bob"] {
+        for value in [
+            format!("Bearer {BOB_KEY}"),
+            format!("bearer {BOB_KEY}"),
+            format!("BEARER {BOB_KEY}"),
+        ] {
             assert!(
-                auth().authenticate(&headers(Some(value))).is_ok(),
+                auth().authenticate(&headers(Some(&value))).is_ok(),
                 "{value}"
             );
         }
@@ -306,15 +315,21 @@ mod tests {
         // Trimming the credential would let "sk_bob " and "sk_bob" both authenticate,
         // which quietly widens what counts as the key.
         let auth = auth();
-        assert!(auth.authenticate(&headers(Some("Bearer sk_bob "))).is_err());
+        assert!(
+            auth.authenticate(&headers(Some(&format!("Bearer {BOB_KEY} "))))
+                .is_err()
+        );
         // Only the separator between scheme and credential is flexible.
-        assert!(auth.authenticate(&headers(Some("Bearer  sk_bob"))).is_ok());
+        assert!(
+            auth.authenticate(&headers(Some(&format!("Bearer  {BOB_KEY}"))))
+                .is_ok()
+        );
     }
 
     #[test]
     fn no_configured_keys_means_the_door_is_closed() {
         // Not "everything authenticates" — an empty key list must reject everything.
-        let auth = ApiKeyAuth::new(ApiKeys::parse(""));
+        let auth = ApiKeyAuth::new(ApiKeys::default());
         assert_eq!(
             auth.authenticate(&headers(Some("Bearer anything")))
                 .unwrap_err(),

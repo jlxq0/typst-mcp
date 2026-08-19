@@ -170,7 +170,10 @@ impl TestServer {
             ("PUBLIC_URL", "http://127.0.0.1:0".to_owned()),
             ("TENANT_SALT", SALT.to_owned()),
             ("SIGNING_SECRET", SALT.to_owned()),
-            ("API_KEYS", "alice:sk_alice_0123456789abcdef".to_owned()),
+            (
+                "API_KEYS",
+                "alice:sk_alice_0123456789abcdef0123456789abcdef".to_owned(),
+            ),
             ("DATA_DIR", data.path().display().to_string()),
             ("TEMPLATE_DIR", repo("templates").display().to_string()),
             ("FONT_DIRS", repo("fonts").display().to_string()),
@@ -366,7 +369,7 @@ async fn an_api_key_is_not_accepted_on_mcp() {
     let server = TestServer::start().await;
     let response = server
         .rpc(
-            Some("sk_alice_0123456789abcdef"),
+            Some("sk_alice_0123456789abcdef0123456789abcdef"),
             serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}),
         )
         .await;

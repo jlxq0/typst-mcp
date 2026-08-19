@@ -19,13 +19,24 @@ use std::time::{Duration, Instant};
 
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use serde::Deserialize;
-use tokio::sync::RwLock;
+use tokio::sync::Mutex;
 
 use crate::config::OidcConfig;
 use crate::principal::Principal;
 
 /// How long a fetched key set is trusted before being refreshed.
 const JWKS_TTL: Duration = Duration::from_secs(60 * 60);
+
+/// No attacker-controlled key id may force more than one refresh in this window.
+const JWKS_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Provider failures are shared across requests instead of retried in parallel.
+const FETCH_FAILURE_BACKOFF: Duration = Duration::from_secs(5);
+
+/// Recently absent key ids are remembered briefly and in bounded space.
+const UNKNOWN_KID_TTL: Duration = Duration::from_secs(30);
+const UNKNOWN_KID_CAP: usize = 1024;
+const MAX_KID_BYTES: usize = 256;
 
 /// Cap on a discovery or JWKS fetch.
 const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
@@ -132,11 +143,23 @@ struct KeyCache {
     fetched_at: Instant,
 }
 
+#[derive(Default)]
+struct KeyState {
+    cache: Option<KeyCache>,
+    unknown_kids: HashMap<String, Instant>,
+    last_failure: Option<Instant>,
+}
+
 /// Validates access tokens against a configured provider.
 pub struct TokenValidator {
     config: OidcConfig,
     http: reqwest::Client,
-    cache: RwLock<Option<KeyCache>>,
+    /// Short-lived access to cached keys and refresh bookkeeping. Never held across
+    /// provider I/O, so a refresh cannot stall a token whose key is already cached.
+    cache: Mutex<KeyState>,
+    /// Single-flight ownership for discovery/JWKS refreshes. A waiter re-checks the
+    /// cache after acquiring it because the preceding owner may have satisfied it.
+    refresh: Mutex<()>,
 }
 
 impl TokenValidator {
@@ -148,32 +171,31 @@ impl TokenValidator {
         Arc::new(Self {
             config,
             http,
-            cache: RwLock::new(None),
+            cache: Mutex::new(KeyState::default()),
+            refresh: Mutex::new(()),
         })
     }
 
     /// Validate `token` and return who it belongs to.
     pub async fn validate(&self, token: &str) -> Result<Principal, TokenError> {
         let header = decode_header(token).map_err(|_| TokenError::Malformed)?;
-        let kid = header.kid.ok_or(TokenError::Malformed)?;
-
-        let key = match self.key(&kid, false).await? {
-            Some(key) => key,
-            // An unknown key id is the normal appearance of a provider rotating its
-            // signing keys. Refetching once turns what would be an outage into a
-            // single slow request.
-            None => self.key(&kid, true).await?.ok_or(TokenError::UnknownKey)?,
-        };
-
-        let mut validation = Validation::new(header.alg);
         // Only RSA: accepting whatever the token names would let an attacker choose a
-        // weaker algorithm, and `none` is the classic version of that attack.
+        // weaker algorithm, and `none` is the classic version of that attack. Check
+        // this before key lookup so a token we will never accept cannot cause I/O.
         if !matches!(
             header.alg,
             Algorithm::RS256 | Algorithm::RS384 | Algorithm::RS512
         ) {
             return Err(TokenError::Rejected);
         }
+        let kid = header.kid.ok_or(TokenError::Malformed)?;
+        if kid.len() > MAX_KID_BYTES {
+            return Err(TokenError::Malformed);
+        }
+
+        let key = self.key(&kid).await?.ok_or(TokenError::UnknownKey)?;
+
+        let mut validation = Validation::new(header.alg);
         let mut audiences = vec![self.config.audience.clone()];
         audiences.extend(self.config.extra_audiences.iter().cloned());
         validation.set_audience(&audiences);
@@ -258,24 +280,47 @@ impl TokenValidator {
             || claims.roles.iter().any(|r| matches(r))
     }
 
-    /// Look up a signing key, optionally forcing a refresh first.
-    async fn key(&self, kid: &str, force: bool) -> Result<Option<DecodingKey>, TokenError> {
-        if !force {
-            let cache = self.cache.read().await;
-            if let Some(cache) = cache.as_ref()
-                && cache.fetched_at.elapsed() < JWKS_TTL
-            {
-                return Ok(cache.keys.get(kid).cloned());
+    /// Look up a signing key, refreshing at most once per interval for an unknown id.
+    async fn key(&self, kid: &str) -> Result<Option<DecodingKey>, TokenError> {
+        {
+            let mut state = self.cache.lock().await;
+            if let Some(result) = inspect_key_state(&mut state, kid, Instant::now()) {
+                return result;
             }
         }
 
-        let keys = self.fetch_keys().await?;
-        let found = keys.get(kid).cloned();
-        *self.cache.write().await = Some(KeyCache {
-            keys,
-            fetched_at: Instant::now(),
-        });
-        Ok(found)
+        // Only refresh ownership spans network I/O. Cache access stays independent so
+        // known keys continue authenticating during a slow or unavailable provider.
+        let _refresh = self.refresh.lock().await;
+
+        // Another request may have refreshed while this one waited for ownership.
+        {
+            let mut state = self.cache.lock().await;
+            if let Some(result) = inspect_key_state(&mut state, kid, Instant::now()) {
+                return result;
+            }
+        }
+
+        let fetched = self.fetch_keys().await;
+        let mut state = self.cache.lock().await;
+        match fetched {
+            Ok(keys) => {
+                let found = keys.get(kid).cloned();
+                state.cache = Some(KeyCache {
+                    keys,
+                    fetched_at: Instant::now(),
+                });
+                state.last_failure = None;
+                if found.is_none() {
+                    remember_unknown(&mut state, kid, Instant::now());
+                }
+                Ok(found)
+            }
+            Err(err) => {
+                state.last_failure = Some(Instant::now());
+                Err(err)
+            }
+        }
     }
 
     async fn fetch_keys(&self) -> Result<HashMap<String, DecodingKey>, TokenError> {
@@ -324,9 +369,54 @@ impl TokenValidator {
     }
 }
 
+/// Return a cached answer, or `None` when this caller should attempt a refresh.
+fn inspect_key_state(
+    state: &mut KeyState,
+    kid: &str,
+    now: Instant,
+) -> Option<Result<Option<DecodingKey>, TokenError>> {
+    state
+        .unknown_kids
+        .retain(|_, seen| now.duration_since(*seen) < UNKNOWN_KID_TTL);
+    if state.unknown_kids.contains_key(kid) {
+        return Some(Ok(None));
+    }
+
+    if let Some(cache) = state.cache.as_ref()
+        && cache.fetched_at.elapsed() < JWKS_TTL
+    {
+        if let Some(key) = cache.keys.get(kid) {
+            return Some(Ok(Some(key.clone())));
+        }
+        if cache.fetched_at.elapsed() < JWKS_REFRESH_INTERVAL {
+            remember_unknown(state, kid, now);
+            return Some(Ok(None));
+        }
+    }
+
+    if state
+        .last_failure
+        .is_some_and(|failed| failed.elapsed() < FETCH_FAILURE_BACKOFF)
+    {
+        return Some(Err(TokenError::ProviderUnavailable));
+    }
+
+    None
+}
+
+fn remember_unknown(state: &mut KeyState, kid: &str, now: Instant) {
+    if state.unknown_kids.len() < UNKNOWN_KID_CAP || state.unknown_kids.contains_key(kid) {
+        state.unknown_kids.insert(kid.to_owned(), now);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use axum::{Json, routing::get};
+    use tokio::sync::Notify;
 
     fn config() -> OidcConfig {
         OidcConfig {
@@ -352,6 +442,124 @@ mod tests {
 
     fn validator() -> Arc<TokenValidator> {
         TokenValidator::new(config())
+    }
+
+    fn token_with_header(alg: &str, kid: &str) -> String {
+        let header = serde_json::json!({ "alg": alg, "typ": "JWT", "kid": kid });
+        format!(
+            "{}.{}.eA",
+            base64_url(header.to_string().as_bytes()),
+            base64_url(br#"{"sub":"attacker"}"#)
+        )
+    }
+
+    async fn counting_validator() -> (Arc<TokenValidator>, Arc<AtomicUsize>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let issuer = format!("http://{}", listener.local_addr().expect("addr"));
+        let requests = Arc::new(AtomicUsize::new(0));
+        let discovery_issuer = issuer.clone();
+        let discovery_requests = Arc::clone(&requests);
+        let key_requests = Arc::clone(&requests);
+        let app = axum::Router::new()
+            .route(
+                "/.well-known/openid-configuration",
+                get(move || {
+                    let issuer = discovery_issuer.clone();
+                    let requests = Arc::clone(&discovery_requests);
+                    async move {
+                        requests.fetch_add(1, Ordering::SeqCst);
+                        Json(serde_json::json!({
+                            "issuer": issuer,
+                            "jwks_uri": format!("{issuer}/keys"),
+                        }))
+                    }
+                }),
+            )
+            .route(
+                "/keys",
+                get(move || {
+                    let requests = Arc::clone(&key_requests);
+                    async move {
+                        requests.fetch_add(1, Ordering::SeqCst);
+                        Json(serde_json::json!({ "keys": [] }))
+                    }
+                }),
+            );
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let mut oidc = config();
+        oidc.issuer = issuer;
+        (TokenValidator::new(oidc), requests)
+    }
+
+    async fn failing_validator() -> (Arc<TokenValidator>, Arc<AtomicUsize>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let issuer = format!("http://{}", listener.local_addr().expect("addr"));
+        let requests = Arc::new(AtomicUsize::new(0));
+        let handler_requests = Arc::clone(&requests);
+        let app = axum::Router::new().route(
+            "/.well-known/openid-configuration",
+            get(move || {
+                let requests = Arc::clone(&handler_requests);
+                async move {
+                    requests.fetch_add(1, Ordering::SeqCst);
+                    (axum::http::StatusCode::SERVICE_UNAVAILABLE, "unavailable")
+                }
+            }),
+        );
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let mut oidc = config();
+        oidc.issuer = issuer;
+        (TokenValidator::new(oidc), requests)
+    }
+
+    async fn blocking_validator() -> (Arc<TokenValidator>, Arc<Notify>, Arc<Notify>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let issuer = format!("http://{}", listener.local_addr().expect("addr"));
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let handler_started = Arc::clone(&started);
+        let handler_release = Arc::clone(&release);
+        let discovery_issuer = issuer.clone();
+        let app = axum::Router::new()
+            .route(
+                "/.well-known/openid-configuration",
+                get(move || {
+                    let started = Arc::clone(&handler_started);
+                    let release = Arc::clone(&handler_release);
+                    let issuer = discovery_issuer.clone();
+                    async move {
+                        started.notify_one();
+                        release.notified().await;
+                        Json(serde_json::json!({
+                            "issuer": issuer,
+                            "jwks_uri": format!("{issuer}/keys"),
+                        }))
+                    }
+                }),
+            )
+            .route(
+                "/keys",
+                get(|| async { Json(serde_json::json!({ "keys": [] })) }),
+            );
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let mut oidc = config();
+        oidc.issuer = issuer;
+        (TokenValidator::new(oidc), started, release)
     }
 
     #[test]
@@ -416,6 +624,118 @@ mod tests {
             validator().validate(&token).await.unwrap_err(),
             TokenError::Malformed
         );
+    }
+
+    #[tokio::test]
+    async fn a_disallowed_algorithm_is_rejected_before_network_work() {
+        let token = token_with_header("HS256", "attacker-key");
+        let mut oidc = config();
+        oidc.issuer = "http://127.0.0.1:9".to_owned();
+        assert_eq!(
+            TokenValidator::new(oidc)
+                .validate(&token)
+                .await
+                .unwrap_err(),
+            TokenError::Rejected
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_unknown_keys_share_one_fetch_and_are_negative_cached() {
+        let (validator, requests) = counting_validator().await;
+        let token = token_with_header("RS256", "unknown-key");
+        let mut tasks = Vec::new();
+        for _ in 0..16 {
+            let validator = Arc::clone(&validator);
+            let token = token.clone();
+            tasks.push(tokio::spawn(
+                async move { validator.validate(&token).await },
+            ));
+        }
+        for task in tasks {
+            assert_eq!(
+                task.await.expect("join").unwrap_err(),
+                TokenError::UnknownKey
+            );
+        }
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+
+        assert_eq!(
+            validator.validate(&token).await.unwrap_err(),
+            TokenError::UnknownKey
+        );
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn concurrent_provider_failures_are_single_flight_and_throttled() {
+        let (validator, requests) = failing_validator().await;
+        let token = token_with_header("RS256", "unknown-key");
+        let mut tasks = Vec::new();
+        for _ in 0..16 {
+            let validator = Arc::clone(&validator);
+            let token = token.clone();
+            tasks.push(tokio::spawn(
+                async move { validator.validate(&token).await },
+            ));
+        }
+        for task in tasks {
+            assert_eq!(
+                task.await.expect("join").unwrap_err(),
+                TokenError::ProviderUnavailable
+            );
+        }
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+
+        assert_eq!(
+            validator.validate(&token).await.unwrap_err(),
+            TokenError::ProviderUnavailable
+        );
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_refresh_does_not_block_an_already_cached_key() {
+        let (validator, started, release) = blocking_validator().await;
+        {
+            let mut state = validator.cache.lock().await;
+            state.cache = Some(KeyCache {
+                keys: HashMap::from([(
+                    "known-key".to_owned(),
+                    DecodingKey::from_secret(b"test-only"),
+                )]),
+                // Old enough that an unknown id is allowed to start a refresh, but
+                // young enough that a known key remains usable.
+                fetched_at: Instant::now() - JWKS_REFRESH_INTERVAL,
+            });
+        }
+
+        let refreshing = {
+            let validator = Arc::clone(&validator);
+            tokio::spawn(async move { validator.key("unknown-key").await })
+        };
+        tokio::time::timeout(Duration::from_secs(1), started.notified())
+            .await
+            .expect("refresh started");
+
+        let known = tokio::time::timeout(Duration::from_millis(100), validator.key("known-key"))
+            .await
+            .expect("cached key must not wait for provider I/O")
+            .expect("lookup");
+        assert!(known.is_some());
+
+        release.notify_one();
+        assert!(refreshing.await.expect("join").expect("refresh").is_none());
+    }
+
+    #[test]
+    fn unknown_key_cache_is_bounded() {
+        let mut state = KeyState::default();
+        let now = Instant::now();
+        for n in 0..=UNKNOWN_KID_CAP {
+            remember_unknown(&mut state, &format!("unknown-{n}"), now);
+        }
+        assert_eq!(state.unknown_kids.len(), UNKNOWN_KID_CAP);
     }
 
     fn base64_url(bytes: &[u8]) -> String {

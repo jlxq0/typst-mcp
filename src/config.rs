@@ -16,7 +16,7 @@ use std::time::Duration;
 use thiserror::Error;
 
 use crate::oauth_redirect;
-use crate::principal::ApiKeys;
+use crate::principal::{ApiKeyConfigError, ApiKeys};
 use crate::store::Limits;
 
 /// Prefix for every variable this reads.
@@ -41,6 +41,8 @@ pub enum ConfigError {
         value: String,
         expected: &'static str,
     },
+    #[error("{PREFIX}API_KEYS: {0}")]
+    ApiKeys(#[from] ApiKeyConfigError),
     #[error(
         "no credentials configured: set {PREFIX}API_KEYS, {PREFIX}OIDC_ISSUER, or both. \
          Starting without either would expose an unauthenticated renderer."
@@ -112,9 +114,10 @@ impl Config {
         let tenant_salt = secret(get, "TENANT_SALT")?;
         let signing_secret = secret(get, "SIGNING_SECRET")?;
 
-        let api_keys = get("API_KEYS")
-            .map(|v| ApiKeys::parse(&v))
-            .unwrap_or_default();
+        let api_keys = match get("API_KEYS").filter(|v| !v.trim().is_empty()) {
+            Some(value) => ApiKeys::parse(&value)?,
+            None => ApiKeys::default(),
+        };
         let dcr_client_id = get("DCR_CLIENT_ID").filter(|v| !v.trim().is_empty());
         let oauth_redirect_uris =
             if let Some(raw) = get("OAUTH_REDIRECT_URIS").filter(|v| !v.trim().is_empty()) {
@@ -361,7 +364,7 @@ mod tests {
             ("PUBLIC_URL", "https://typst.example.com"),
             ("TENANT_SALT", SALT),
             ("SIGNING_SECRET", SALT),
-            ("API_KEYS", "alice:sk_test"),
+            ("API_KEYS", "alice:sk_0123456789abcdef0123456789abcdef"),
         ]
         .iter()
         .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
@@ -412,6 +415,34 @@ mod tests {
             let err = load(&[(name, "changeme")]).expect_err("must fail");
             assert_eq!(err, ConfigError::SecretTooShort { name, actual: 8 });
         }
+    }
+
+    #[test]
+    fn malformed_and_short_api_keys_are_refused_without_echoing_the_secret() {
+        for value in [
+            "alice:",
+            ":sk_0123456789abcdef0123456789abcdef",
+            "sk_0123456789abcdef0123456789abcdef",
+            "alice:short",
+        ] {
+            let err = load(&[("API_KEYS", value)]).expect_err("must fail");
+            let message = err.to_string();
+            assert!(message.contains("TYPST_MCP_API_KEYS"), "{message}");
+            assert!(!message.contains(value), "secret leaked in {message}");
+        }
+    }
+
+    #[test]
+    fn duplicate_api_key_labels_are_refused() {
+        let err = load(&[(
+            "API_KEYS",
+            concat!(
+                "alice:sk_0123456789abcdef0123456789abcdef,",
+                "alice:sk_fedcba9876543210fedcba9876543210"
+            ),
+        )])
+        .expect_err("must fail");
+        assert!(err.to_string().contains("duplicate label \"alice\""));
     }
 
     #[test]

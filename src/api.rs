@@ -252,7 +252,9 @@ fn render_error(err: RenderError) -> Response {
         RenderError::UnknownTemplate { .. } => (StatusCode::NOT_FOUND, "unknown_template"),
         RenderError::Ambiguous | RenderError::Empty => (StatusCode::BAD_REQUEST, "bad_request"),
         RenderError::Template(_) => (StatusCode::UNPROCESSABLE_ENTITY, "invalid_data"),
-        RenderError::Bundle(_) => (StatusCode::UNPROCESSABLE_ENTITY, "invalid_bundle"),
+        RenderError::DuplicateAsset(_) | RenderError::Bundle(_) => {
+            (StatusCode::UNPROCESSABLE_ENTITY, "invalid_bundle")
+        }
         RenderError::Compile { .. } => (StatusCode::UNPROCESSABLE_ENTITY, "compile_failed"),
         RenderError::Store(e) => return store_error(e),
         RenderError::Spawn(crate::spawn::SpawnError::Timeout { .. }) => {
