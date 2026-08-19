@@ -69,7 +69,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # --- OIDC token validation (Entra) ---
 # rustls only: no OpenSSL in the image, and nothing to keep patched.
-jsonwebtoken = "9.3"
+jsonwebtoken = "10.3"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 # --- identity, signed URLs, ids ---
