@@ -21,13 +21,12 @@ Specs in `.spec/`, ordered tasks in `Plan.md`, success criteria in `GOAL.md`.
 - The live store is a 5 GiB ReadWriteOnce PVC on one replica with `Recreate` rollout. It
   survives pod replacement; TTL and LRU quotas govern content, and PVC capacity is the
   final disk bound. It is still a re-creatable cache, not durable business storage.
-- OfficeMaster currently has the canonical Hanso library at `typst/hanso.typ` and pushed
-  KSC and Lenno implementations under `brands/<brand>/typst/` on
-  `feat/ksc-typst-template`. Freudenberg has a brief/master but no completed Typst library. Preserve the unrelated
+- OfficeMaster has pushed Hanso, KSC and Lenno canonical libraries under
+  `brands/<brand>/typst/` on `feat/ksc-typst-template`. Freudenberg has a brief/master but
+  no completed Typst library. Preserve the unrelated
   dirty Freudenberg worktree; never fold it into a template sync accidentally.
 - `scripts/sync-templates.sh` vendors Hanso, KSC and Lenno. Trusted CI checks all three
-  against OfficeMaster; moving Hanso to its final brand-local home and adding Freudenberg
-  remain target work.
+  against their final brand-local OfficeMaster paths; adding Freudenberg remains target work.
 
 ## Known Pitfalls
 

@@ -25,10 +25,9 @@ fi
 
 # brand -> the brand's Typst library within OfficeMaster.
 #
-# `hanso` currently lives in the standalone typst/ directory; the remaining brands live
-# under brands/<name>/typst/. Add a line per brand.
+# Every canonical library lives beside its brand brief and Office masters.
 BRANDS=(
-  "hanso:typst/hanso.typ"
+  "hanso:brands/hanso/typst/hanso.typ"
   "ksc:brands/ksc/typst/ksc.typ"
   "lenno:brands/lenno/typst/lenno.typ"
 )
