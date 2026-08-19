@@ -88,6 +88,8 @@ rand = "0.8"
 # --- template manifests + data validation ---
 toml = "1.1"
 jsonschema = { version = "0.49", default-features = false }
+tar = "0.4"
+flate2 = "1"
 
 # --- errors ---
 anyhow = "1.0"

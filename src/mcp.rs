@@ -24,6 +24,7 @@ use rmcp::RoleServer;
 use rmcp::service::RequestContext;
 
 use crate::auth::Authenticated;
+use crate::bundle::BundleFile;
 use crate::config::Config;
 use crate::error::ApiError;
 use crate::principal::TenantId;
@@ -83,6 +84,32 @@ pub struct CompileArgs {
 pub struct TemplateArgs {
     /// The template's name.
     pub template: String,
+}
+
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
+pub struct TemplateListArgs {
+    /// Include this caller's live ephemeral templates. Defaults to true.
+    #[serde(default)]
+    pub include_ephemeral: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct TemplateTextFile {
+    /// Bundle-relative path such as `template.toml` or `draft.typ`.
+    pub path: String,
+    /// UTF-8 text. Binary files must be uploaded through REST first.
+    pub text: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct UploadTemplateArgs {
+    /// Draft name; must exactly match `name` in template.toml.
+    pub name: String,
+    /// Complete text source tree, including template.toml.
+    pub files: Vec<TemplateTextFile>,
+    /// Existing tenant-scoped binary assets to copy into this template.
+    #[serde(default)]
+    pub assets: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -186,21 +213,48 @@ impl TypstMcp {
         description = "List the available document templates, with the data fields each \
                        one takes."
     )]
-    async fn typst_templates(&self) -> Result<CallToolResult, McpError> {
-        let templates: Vec<serde_json::Value> = self
+    async fn typst_templates(
+        &self,
+        Parameters(args): Parameters<TemplateListArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let tenant = self.tenant(&ctx)?;
+        let mut templates: Vec<serde_json::Value> = self
             .render
             .templates()
             .iter()
             .map(|t| {
                 serde_json::json!({
+                    "id": t.name(),
                     "name": t.name(),
-                    "kind": kind_name(t.manifest.kind),
+                    "kind": "baked",
+                    "template_kind": kind_name(t.manifest.kind),
+                    "version": t.manifest.version,
                     "description": t.manifest.description,
                     "data_fields": t.data_fields(),
                     "notice": t.manifest.notice,
                 })
             })
             .collect();
+        if args.include_ephemeral.unwrap_or(true) {
+            for entry in self.render.store().list(&tenant, Kind::Template) {
+                let template = match self.render.template(&tenant, &entry.id) {
+                    Ok(template) => template,
+                    Err(error) => return ApiError::from(error).into_mcp_result(),
+                };
+                templates.push(serde_json::json!({
+                    "id": entry.id,
+                    "name": template.name(),
+                    "kind": "ephemeral",
+                    "template_kind": kind_name(template.manifest.kind),
+                    "version": template.manifest.version,
+                    "description": template.manifest.description,
+                    "data_fields": template.data_fields(),
+                    "notice": template.manifest.notice,
+                    "expires_at": entry.expires_at,
+                }));
+            }
+        }
         json_result(serde_json::json!({ "templates": templates }))
     }
 
@@ -211,11 +265,11 @@ impl TypstMcp {
     async fn typst_template_schema(
         &self,
         Parameters(args): Parameters<TemplateArgs>,
+        ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
-        let Some(template) = self.render.templates().get(&args.template) else {
-            // Naming the alternatives turns a dead end into a next step.
-            return ApiError::unknown_template(&args.template, &self.render.templates().names())
-                .into_mcp_result();
+        let template = match self.render.template(&self.tenant(&ctx)?, &args.template) {
+            Ok(template) => template,
+            Err(error) => return ApiError::from(error).into_mcp_result(),
         };
         json_result(serde_json::json!({
             "name": template.name(),
@@ -226,6 +280,35 @@ impl TypstMcp {
             "example_data": template.example(),
             "example_body": template.example_body(),
         }))
+    }
+
+    #[tool(
+        description = "Create a tenant-scoped ephemeral template from text files. Include \
+                       template.toml and the Typst sources; upload binary assets through \
+                       REST first and bind their ids here. A supplied fixture is compiled \
+                       before the draft is stored."
+    )]
+    async fn typst_upload_template(
+        &self,
+        Parameters(args): Parameters<UploadTemplateArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let files = args
+            .files
+            .into_iter()
+            .map(|file| BundleFile::text(file.path, file.text))
+            .collect();
+        match self
+            .render
+            .upload_template(&self.tenant(&ctx)?, Some(&args.name), files, &args.assets)
+            .await
+        {
+            Ok(uploaded) => json_result(
+                serde_json::to_value(uploaded)
+                    .map_err(|error| McpError::internal_error(error.to_string(), None))?,
+            ),
+            Err(error) => ApiError::from(error).into_mcp_result(),
+        }
     }
 
     #[tool(

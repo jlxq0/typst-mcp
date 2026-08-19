@@ -20,7 +20,9 @@ use crate::protocol::{JobLimits, JobResult};
 use crate::signing::Signer;
 use crate::spawn::{CompileService, SpawnError};
 use crate::store::{Kind, Meta, Store, StoreError};
-use crate::templates::{SourceMap, TemplateError, TemplateKind, TemplateSet};
+use crate::templates::{
+    STORED_ARCHIVE, SourceMap, Template, TemplateError, TemplateKind, TemplateSet,
+};
 
 /// Filename of the rendered document within its store entry.
 pub const DOCUMENT_NAME: &str = PDF_NAME;
@@ -98,6 +100,15 @@ pub struct CompiledDocument {
     pub diagnostics: Vec<Diagnostic>,
     pub pdf: Vec<u8>,
     pub previews: Vec<RenderedPreview>,
+}
+
+/// The stable identity and lifetime of an uploaded template.
+#[derive(Debug, Clone, Serialize)]
+pub struct UploadedTemplate {
+    pub id: String,
+    pub name: String,
+    pub expires_at: u64,
+    pub warnings: Vec<String>,
 }
 
 /// Why a render did not produce a document.
@@ -192,11 +203,21 @@ impl RenderService {
         request: &RenderRequest,
     ) -> Result<CompiledDocument, RenderError> {
         let (bundle, source_map) = self.assemble(tenant, request)?;
+        self.compile_bundle(bundle, source_map, self.job_limits(request))
+            .await
+    }
+
+    async fn compile_bundle(
+        &self,
+        bundle: Bundle,
+        source_map: SourceMap,
+        limits: JobLimits,
+    ) -> Result<CompiledDocument, RenderError> {
         let prepared = PreparedJob::stage(
             &self.config.data_dir.join("tmp"),
             &bundle,
             self.font_dirs.clone(),
-            self.job_limits(request),
+            limits,
         )
         .map_err(RenderError::Workspace)?;
 
@@ -248,6 +269,112 @@ impl RenderService {
         }
     }
 
+    /// Resolve a permanent template name or a tenant-scoped ephemeral id.
+    pub fn template(&self, tenant: &TenantId, reference: &str) -> Result<Template, RenderError> {
+        // Baked names win by construction. Ephemeral ids cannot collide because the
+        // store validates the `tpl_` prefix and baked template names are human names.
+        if let Some(template) = self.templates.get(reference) {
+            return Ok(template.clone());
+        }
+        if reference.starts_with(Kind::Template.prefix()) {
+            let bytes = self
+                .store
+                .get(tenant, Kind::Template, reference, STORED_ARCHIVE)?;
+            return Ok(Template::from_archive(
+                &bytes,
+                self.config.max_bundle_bytes,
+            )?);
+        }
+        Err(RenderError::UnknownTemplate {
+            name: reference.to_owned(),
+            available: self.template_names(tenant).join(", "),
+        })
+    }
+
+    /// Baked names followed by this tenant's live ephemeral ids.
+    pub fn template_names(&self, tenant: &TenantId) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .templates
+            .names()
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        names.extend(
+            self.store
+                .list(tenant, Kind::Template)
+                .into_iter()
+                .map(|entry| entry.id),
+        );
+        names
+    }
+
+    /// Validate, fixture-compile and atomically persist an ephemeral template.
+    pub async fn upload_template(
+        &self,
+        tenant: &TenantId,
+        requested_name: Option<&str>,
+        mut files: Vec<BundleFile>,
+        assets: &[String],
+    ) -> Result<UploadedTemplate, RenderError> {
+        files.extend(self.load_assets(tenant, assets)?);
+        let template = Template::from_source_files(files, self.config.max_bundle_bytes)?;
+        if let Some(requested) = requested_name
+            && requested != template.name()
+        {
+            return Err(TemplateError::NameMismatch {
+                requested: requested.to_owned(),
+                manifest: template.name().to_owned(),
+            }
+            .into());
+        }
+
+        let mut warnings = Vec::new();
+        if template.example().is_some() || template.example_body().is_some() {
+            let data = template
+                .example()
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({}));
+            let body = match template.manifest.kind {
+                TemplateKind::Wrapper => template.example_body(),
+                TemplateKind::Data => None,
+            };
+            let assembled =
+                template.assemble(&data, body, Vec::new(), self.config.max_bundle_bytes)?;
+            let limits = JobLimits {
+                max_bundle_bytes: self.config.max_bundle_bytes,
+                max_pages: self.config.max_pages,
+                preview_pages: Vec::new(),
+                preview_scale_millis: 1000,
+                preview_max_px: self.config.preview_max_px,
+                memory_bytes: self.config.worker_memory_bytes,
+            };
+            let compiled = self
+                .compile_bundle(assembled.bundle, assembled.source_map, limits)
+                .await?;
+            warnings.extend(compiled.diagnostics.into_iter().map(|d| d.message));
+        }
+
+        let archive = template.to_archive()?;
+        let entry = self.store.put(
+            tenant,
+            Kind::Template,
+            STORED_ARCHIVE,
+            &archive,
+            Meta::new(STORED_ARCHIVE, "application/x-tar"),
+        )?;
+        Ok(UploadedTemplate {
+            id: entry.id,
+            name: template.name().to_owned(),
+            expires_at: entry.expires_at,
+            warnings,
+        })
+    }
+
+    pub fn delete_template(&self, tenant: &TenantId, id: &str) -> Result<(), RenderError> {
+        self.store.delete(tenant, Kind::Template, id)?;
+        Ok(())
+    }
+
     /// Compile `request`, persist the result, and return stored-document metadata.
     pub async fn render(
         &self,
@@ -280,13 +407,7 @@ impl RenderService {
         let assets = self.load_assets(tenant, &request.assets)?;
 
         if let Some(name) = &request.template {
-            let template =
-                self.templates
-                    .get(name)
-                    .ok_or_else(|| RenderError::UnknownTemplate {
-                        name: name.clone(),
-                        available: self.templates.names().join(", "),
-                    })?;
+            let template = self.template(tenant, name)?;
             let data = request.data.clone().unwrap_or(serde_json::json!({}));
             let body = match template.manifest.kind {
                 TemplateKind::Wrapper => request.body.as_deref(),

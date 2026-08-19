@@ -21,6 +21,7 @@ use crate::templates::TemplateError;
 pub enum ErrorCode {
     BadRequest,
     Unauthorized,
+    Forbidden,
     ProviderUnavailable,
     UnknownTemplate,
     NotFound,
@@ -80,6 +81,10 @@ impl ApiError {
 
     pub fn not_found(message: impl Into<String>) -> Self {
         Self::new(StatusCode::NOT_FOUND, ErrorCode::NotFound, message)
+    }
+
+    pub fn forbidden(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::FORBIDDEN, ErrorCode::Forbidden, message)
     }
 
     pub fn unknown_template(name: &str, available: &[&str]) -> Self {
@@ -212,7 +217,23 @@ impl From<TemplateError> for ApiError {
                 ErrorCode::InvalidData,
                 error.to_string(),
             ),
-            _ => Self::internal("template_configuration"),
+            TemplateError::BadManifest { .. }
+            | TemplateError::MissingEntrypoint { .. }
+            | TemplateError::NoWrapperFn { .. }
+            | TemplateError::BadWrapperFn { .. }
+            | TemplateError::ReservedName(_)
+            | TemplateError::NonTextMetadata(_)
+            | TemplateError::NameMismatch { .. }
+            | TemplateError::NonFileMember { .. }
+            | TemplateError::BadArchive(_)
+            | TemplateError::BadPath { .. }
+            | TemplateError::BadSchema { .. }
+            | TemplateError::NoManifest(_) => Self::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                ErrorCode::InvalidBundle,
+                error.to_string(),
+            ),
+            TemplateError::Io { .. } => Self::internal("template_io"),
         }
     }
 }

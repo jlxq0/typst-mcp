@@ -10,12 +10,13 @@ Self-host the `/mcp` endpoint on your own domain.
 ## Status
 
 Production currently runs `v0.1.8` at `https://typst-mcp.hanso.group`. It ships one
-Hanso template and seven MCP tools. The intended eight-tool surface adds
-`typst_upload_template`; ephemeral templates, template POST/DELETE, uploaded-font
-isolation, metrics/OTLP, the KSC/Lenno/Freudenberg templates, and image smoke/soak gates
-remain implementation work. Current `main` has already replaced bulk worker frames with
-parent-staged path-only I/O, made direct-PDF responses no-store, and added tenant-bound OIDC
-downloads; deployed `v0.1.8` predates those checkpoints. See `Plan.md` for the checklist.
+Hanso template and seven MCP tools. Current `main` exposes the full eight-tool surface,
+including text-only `typst_upload_template`, and adds tenant-scoped ephemeral template
+resolution plus safe REST tar/gzip upload and deletion. It has also replaced bulk worker
+frames with parent-staged path-only I/O, made direct-PDF responses no-store, unified error
+mapping, and added tenant-bound OIDC downloads. Uploaded-font isolation, metrics/OTLP, the
+KSC/Lenno/Freudenberg templates, and image smoke/soak gates remain implementation work;
+deployed `v0.1.8` predates all current-main checkpoints. See `Plan.md` for the checklist.
 
 ## Shape (RFC 9728 / MCP authorization)
 
@@ -61,7 +62,7 @@ cleartext `http` only on a loopback host (RFC 8252 §7.3). There is no
 | `typst_fonts` | Fonts available to compiles |
 | `typst_assets` | List uploaded assets for the caller |
 | `typst_link` | Mint a short-lived signed download URL |
-| `typst_upload_template` | **Target:** create a tenant-scoped text-only template; not in `v0.1.8` |
+| `typst_upload_template` | Create a tenant-scoped text-only template (current `main`; not deployed `v0.1.8`) |
 
 REST (`/api/v1`) is the same surface behind static API keys, for services that
 should not put a long-lived secret in a desktop MCP client.

@@ -516,12 +516,88 @@ async fn a_valid_token_lists_the_tools() {
         "typst_compile",
         "typst_templates",
         "typst_template_schema",
+        "typst_upload_template",
         "typst_fonts",
         "typst_assets",
         "typst_link",
     ] {
         assert!(names.contains(&expected), "missing {expected}: {names:?}");
     }
+    assert_eq!(names.len(), 8, "the public contract is exactly eight tools");
+}
+
+#[tokio::test]
+async fn mcp_uploads_and_renders_a_text_only_ephemeral_template() {
+    let server = TestServer::start().await;
+    let alice = server.idp.token("alice");
+    let bob = server.idp.token("bob");
+    let uploaded = server
+        .call(
+            &alice,
+            "tools/call",
+            serde_json::json!({
+                "name": "typst_upload_template",
+                "arguments": {
+                    "name": "mcp-draft",
+                    "files": [
+                        {
+                            "path": "template.toml",
+                            "text": "name = \"mcp-draft\"\nkind = \"wrapper\"\nentrypoint = \"draft.typ\"\nwrapper_fn = \"draft\"\n"
+                        },
+                        {
+                            "path": "draft.typ",
+                            "text": "#let draft(body) = { set page(width: 100mm, height: 100mm); body }\n"
+                        },
+                        { "path": "fixture.json", "text": "{}\n" },
+                        { "path": "fixture.body.typ", "text": "= Fixture\n" }
+                    ]
+                }
+            }),
+        )
+        .await;
+    let payload = json_content_of(&uploaded);
+    let id = payload["id"].as_str().expect("template id");
+    assert!(id.starts_with("tpl_"));
+
+    let listed = server
+        .call(
+            &alice,
+            "tools/call",
+            serde_json::json!({
+                "name": "typst_templates", "arguments": {}
+            }),
+        )
+        .await;
+    let listed = json_content_of(&listed);
+    assert!(
+        listed["templates"]
+            .as_array()
+            .is_some_and(|templates| templates.iter().any(|t| t["id"] == id))
+    );
+
+    let rendered = server
+        .call(
+            &alice,
+            "tools/call",
+            serde_json::json!({
+                "name": "typst_render",
+                "arguments": { "template": id, "body": "= Draft\n\nLooks good." }
+            }),
+        )
+        .await;
+    assert!(!images_in(&rendered).is_empty());
+
+    let denied = server
+        .call(
+            &bob,
+            "tools/call",
+            serde_json::json!({
+                "name": "typst_template_schema",
+                "arguments": { "template": id }
+            }),
+        )
+        .await;
+    assert_eq!(error_envelope_of(&denied)["error"], "not_found");
 }
 
 #[tokio::test]

@@ -222,6 +222,15 @@ impl Bundle {
         self.files.iter().map(|(p, c)| (p.as_str(), c))
     }
 
+    /// Consume the bundle and return its already-normalised files.
+    ///
+    /// Template ingestion uses this to put every archive member through the same
+    /// path, duplicate, count and aggregate-size checks as a compile bundle before
+    /// separating metadata files from document files.
+    pub fn into_files(self) -> BTreeMap<String, FileContent> {
+        self.files
+    }
+
     pub fn inputs(&self) -> &BTreeMap<String, String> {
         &self.inputs
     }

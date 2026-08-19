@@ -12,12 +12,13 @@
 //! [`crate::typst_value`], never string interpolation.
 
 use std::collections::BTreeMap;
+use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::bundle::{Bundle, BundleFile, FileContent, normalise_path};
+use crate::bundle::{Bundle, BundleFile, FileContent, MAX_FILES, normalise_path};
 use crate::diagnostics::Diagnostic;
 use crate::typst_value::{TypstValue, ValueError, is_ident, parse_date};
 
@@ -29,6 +30,9 @@ pub const GENERATED_BODY: &str = "__body.typ";
 
 /// What the body file is called when we report a diagnostic in it.
 pub const BODY_DISPLAY_NAME: &str = "body.typ";
+
+/// Filename used for the single atomic store object backing an ephemeral template.
+pub const STORED_ARCHIVE: &str = "template.tar";
 
 /// Prefix reserved for generated files.
 const RESERVED_PREFIX: &str = "__";
@@ -171,6 +175,14 @@ pub enum TemplateError {
     BadWrapperFn { name: String, value: String },
     #[error("template file {0:?} uses the reserved `__` prefix")]
     ReservedName(String),
+    #[error("template metadata file {0:?} must be UTF-8 text")]
+    NonTextMetadata(String),
+    #[error("uploaded template name {requested:?} does not match manifest name {manifest:?}")]
+    NameMismatch { requested: String, manifest: String },
+    #[error("template archive member {path:?} is not a regular file")]
+    NonFileMember { path: String },
+    #[error("template archive is invalid: {0}")]
+    BadArchive(String),
     #[error("template {name:?} has an invalid file path {path:?}: {source}")]
     BadPath {
         name: String,
@@ -208,6 +220,9 @@ pub struct Template {
     schema: Option<serde_json::Value>,
     example: Option<serde_json::Value>,
     example_body: Option<String>,
+    manifest_toml: String,
+    schema_json: Option<String>,
+    fixture_json: Option<String>,
 }
 
 /// The pieces of a template, however they arrived.
@@ -250,8 +265,12 @@ impl Template {
     /// Every check here runs at *upload* time as well as at deploy time, so a caller
     /// finds out their template is broken when they send it rather than at first use.
     pub fn assemble_from(parts: TemplateParts) -> Result<Self, TemplateError> {
+        let manifest_toml = parts.manifest_toml;
+        let schema_json = parts.schema_json;
+        let fixture_json = parts.fixture_json;
+        let fixture_body = parts.fixture_body;
         let manifest: Manifest =
-            toml::from_str(&parts.manifest_toml).map_err(|source| TemplateError::BadManifest {
+            toml::from_str(&manifest_toml).map_err(|source| TemplateError::BadManifest {
                 path: PathBuf::from("template.toml"),
                 source,
             })?;
@@ -297,7 +316,7 @@ impl Template {
 
         // Validated here rather than on first use: a broken schema should fail when the
         // template arrives, not when a caller happens to hit it.
-        let schema = parse_json(parts.schema_json.as_deref(), "schema.json")?;
+        let schema = parse_json(schema_json.as_deref(), "schema.json")?;
         if let Some(schema) = &schema {
             jsonschema::validator_for(schema).map_err(|e| TemplateError::BadSchema {
                 path: PathBuf::from("schema.json"),
@@ -309,9 +328,166 @@ impl Template {
             manifest,
             files,
             schema,
-            example: parse_json(parts.fixture_json.as_deref(), "fixture.json")?,
-            example_body: parts.fixture_body,
+            example: parse_json(fixture_json.as_deref(), "fixture.json")?,
+            example_body: fixture_body,
+            manifest_toml,
+            schema_json,
+            fixture_json,
         })
+    }
+
+    /// Build an uploaded template from a complete set of source files.
+    ///
+    /// `Bundle::new` is deliberately the first parser: archive and MCP paths therefore
+    /// share the compile bundle's exact traversal, duplicate, file-count and byte caps.
+    pub fn from_source_files(
+        files: Vec<BundleFile>,
+        max_bytes: usize,
+    ) -> Result<Self, TemplateError> {
+        let files = Bundle::new("template.toml", files, BTreeMap::new(), max_bytes)?.into_files();
+        let mut manifest_toml = None;
+        let mut schema_json = None;
+        let mut fixture_json = None;
+        let mut fixture_body = None;
+        let mut template_files = Vec::new();
+
+        for (path, content) in files {
+            let metadata = match path.as_str() {
+                "template.toml" => Some(&mut manifest_toml),
+                "schema.json" => Some(&mut schema_json),
+                "fixture.json" => Some(&mut fixture_json),
+                "fixture.body.typ" => Some(&mut fixture_body),
+                _ => None,
+            };
+            if let Some(slot) = metadata {
+                let FileContent::Text(text) = content else {
+                    return Err(TemplateError::NonTextMetadata(path));
+                };
+                *slot = Some(text);
+            } else {
+                template_files.push(BundleFile { path, content });
+            }
+        }
+
+        Self::assemble_from(TemplateParts {
+            manifest_toml: manifest_toml.expect("Bundle required template.toml"),
+            files: template_files,
+            schema_json,
+            fixture_json,
+            fixture_body,
+        })
+    }
+
+    /// Every source file, byte-for-byte, in stable path order.
+    ///
+    /// This is the promotion contract: an ephemeral draft can be unpacked into git
+    /// without regenerating its TOML, JSON, Typst or binary assets.
+    pub fn source_files(&self) -> Vec<BundleFile> {
+        let mut files = self.files.clone();
+        files.push(BundleFile::text(
+            "template.toml",
+            self.manifest_toml.clone(),
+        ));
+        if let Some(text) = &self.schema_json {
+            files.push(BundleFile::text("schema.json", text.clone()));
+        }
+        if let Some(text) = &self.fixture_json {
+            files.push(BundleFile::text("fixture.json", text.clone()));
+        }
+        if let Some(text) = &self.example_body {
+            files.push(BundleFile::text("fixture.body.typ", text.clone()));
+        }
+        files.sort_by(|a, b| a.path.cmp(&b.path));
+        files
+    }
+
+    /// Encode the validated source tree as a deterministic, extraction-free store blob.
+    pub fn to_archive(&self) -> Result<Vec<u8>, TemplateError> {
+        let mut archive = tar::Builder::new(Vec::new());
+        for file in self.source_files() {
+            let bytes = file.content.as_bytes();
+            let mut header = tar::Header::new_gnu();
+            header.set_size(bytes.len() as u64);
+            header.set_mode(0o644);
+            header.set_uid(0);
+            header.set_gid(0);
+            header.set_mtime(0);
+            header.set_cksum();
+            archive
+                .append_data(&mut header, &file.path, bytes)
+                .map_err(|error| TemplateError::BadArchive(error.to_string()))?;
+        }
+        archive
+            .into_inner()
+            .map_err(|error| TemplateError::BadArchive(error.to_string()))
+    }
+
+    /// Decode a tar or gzip-compressed tar without extracting any member to disk.
+    pub fn from_archive(bytes: &[u8], max_bytes: usize) -> Result<Self, TemplateError> {
+        let reader: Box<dyn Read> = if bytes.starts_with(&[0x1f, 0x8b]) {
+            Box::new(flate2::read::GzDecoder::new(Cursor::new(bytes)))
+        } else {
+            Box::new(Cursor::new(bytes))
+        };
+        let mut archive = tar::Archive::new(reader);
+        let entries = archive
+            .entries()
+            .map_err(|error| TemplateError::BadArchive(error.to_string()))?;
+        let mut files = Vec::new();
+        let mut total = 0usize;
+
+        for entry in entries {
+            let entry = entry.map_err(|error| TemplateError::BadArchive(error.to_string()))?;
+            let path_bytes = entry.path_bytes();
+            let path = std::str::from_utf8(&path_bytes)
+                .map_err(|_| TemplateError::BadArchive("member path is not UTF-8".into()))?
+                .to_owned();
+            // Validate even directory/member names that are not read. A traversal path
+            // is rejected because it is hostile, not ignored because we avoid extraction.
+            normalise_path(&path).map_err(|source| TemplateError::BadPath {
+                name: "<upload>".into(),
+                path: path.clone(),
+                source,
+            })?;
+            if !entry.header().entry_type().is_file() {
+                return Err(TemplateError::NonFileMember { path });
+            }
+            if files.len() >= MAX_FILES {
+                return Err(crate::bundle::BundleError::TooManyFiles {
+                    count: files.len() + 1,
+                }
+                .into());
+            }
+            let declared = usize::try_from(entry.size()).unwrap_or(usize::MAX);
+            if total.saturating_add(declared) > max_bytes {
+                return Err(crate::bundle::BundleError::TooLarge {
+                    actual: total.saturating_add(declared),
+                    limit: max_bytes,
+                }
+                .into());
+            }
+            let mut content = Vec::with_capacity(declared.min(max_bytes));
+            entry
+                .take((max_bytes - total + 1) as u64)
+                .read_to_end(&mut content)
+                .map_err(|error| TemplateError::BadArchive(error.to_string()))?;
+            total = total.saturating_add(content.len());
+            if total > max_bytes {
+                return Err(crate::bundle::BundleError::TooLarge {
+                    actual: total,
+                    limit: max_bytes,
+                }
+                .into());
+            }
+            let content = match String::from_utf8(content) {
+                Ok(text) if is_text(&path) => FileContent::Text(text),
+                Ok(text) => FileContent::Binary(text.into_bytes()),
+                Err(error) => FileContent::Binary(error.into_bytes()),
+            };
+            files.push(BundleFile { path, content });
+        }
+
+        Self::from_source_files(files, max_bytes)
     }
 
     /// The template's own files, for storing an uploaded copy.
@@ -1099,5 +1275,75 @@ type = "strings"
         assert_eq!(set.names(), vec!["demo"]);
         assert!(set.get("demo").is_some());
         assert!(set.get("absent").is_none());
+    }
+
+    fn uploaded_files() -> Vec<BundleFile> {
+        vec![
+            BundleFile::text(
+                "template.toml",
+                "name = \"draft\"\nkind = \"wrapper\"\nentrypoint = \"draft.typ\"\nwrapper_fn = \"draft\"\n",
+            ),
+            BundleFile::text(
+                "draft.typ",
+                "#let draft(body) = { set text(fill: blue); body }\n",
+            ),
+            BundleFile::text("fixture.json", "{}\n"),
+            BundleFile::text("fixture.body.typ", "= Exact draft\n"),
+            BundleFile::binary("assets/logo.bin", vec![0, 1, 2, 255]),
+        ]
+    }
+
+    #[test]
+    fn archive_round_trip_preserves_every_source_byte() {
+        let template =
+            Template::from_source_files(uploaded_files(), 1024 * 1024).expect("template");
+        let archive = template.to_archive().expect("archive");
+        let restored = Template::from_archive(&archive, 1024 * 1024).expect("restored");
+
+        let expected: Vec<_> = template
+            .source_files()
+            .into_iter()
+            .map(|file| (file.path, file.content.as_bytes().to_vec()))
+            .collect();
+        let actual: Vec<_> = restored
+            .source_files()
+            .into_iter()
+            .map(|file| (file.path, file.content.as_bytes().to_vec()))
+            .collect();
+        assert_eq!(actual, expected);
+        assert_eq!(restored.to_archive().unwrap(), archive);
+    }
+
+    #[test]
+    fn archive_member_traversal_is_rejected_never_rewritten() {
+        let bytes = raw_archive_member("../outside.typ", b"owned", tar::EntryType::Regular);
+        assert!(matches!(
+            Template::from_archive(&bytes, 1024),
+            Err(TemplateError::BadPath {
+                source: crate::bundle::PathError::Traversal,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn archive_links_are_rejected_even_without_extraction() {
+        let bytes = raw_archive_member("template.toml", b"", tar::EntryType::Symlink);
+        assert!(matches!(
+            Template::from_archive(&bytes, 1024),
+            Err(TemplateError::NonFileMember { .. })
+        ));
+    }
+
+    fn raw_archive_member(name: &str, data: &[u8], kind: tar::EntryType) -> Vec<u8> {
+        let mut header = tar::Header::new_gnu();
+        header.as_mut_bytes()[..name.len()].copy_from_slice(name.as_bytes());
+        header.set_entry_type(kind);
+        header.set_mode(0o644);
+        header.set_size(data.len() as u64);
+        header.set_cksum();
+        let mut builder = tar::Builder::new(Vec::new());
+        builder.append(&header, data).expect("append raw member");
+        builder.into_inner().expect("archive")
     }
 }

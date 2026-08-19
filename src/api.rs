@@ -39,8 +39,11 @@ pub fn router(state: AppState) -> axum::Router {
     let protected = axum::Router::new()
         .route("/render", post(render))
         .route("/compile", post(render))
-        .route("/templates", get(list_templates))
-        .route("/templates/{name}", get(get_template))
+        .route("/templates", get(list_templates).post(upload_template))
+        .route(
+            "/templates/{name}",
+            get(get_template).delete(delete_template),
+        )
         .route("/assets", get(list_assets).post(upload_asset))
         .route("/fonts", get(list_fonts))
         .route("/links", post(create_link))
@@ -252,39 +255,92 @@ async fn render(
 
 #[derive(Serialize)]
 struct TemplateSummary {
+    id: String,
     name: String,
     kind: &'static str,
+    template_kind: &'static str,
     version: String,
     description: String,
     data_fields: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     notice: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expires_at: Option<u64>,
 }
 
-async fn list_templates(State(state): State<AppState>) -> Json<serde_json::Value> {
-    let templates: Vec<TemplateSummary> = state
+#[derive(Debug, Deserialize)]
+struct TemplateListQuery {
+    #[serde(default = "default_true")]
+    include_ephemeral: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn template_summary(
+    id: String,
+    source: &'static str,
+    expires_at: Option<u64>,
+    template: &crate::templates::Template,
+) -> TemplateSummary {
+    TemplateSummary {
+        id,
+        name: template.name().to_owned(),
+        kind: source,
+        template_kind: match template.manifest.kind {
+            TemplateKind::Wrapper => "wrapper",
+            TemplateKind::Data => "data",
+        },
+        version: template.manifest.version.clone(),
+        description: template.manifest.description.clone(),
+        data_fields: template
+            .data_fields()
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+        notice: template.manifest.notice.clone(),
+        expires_at,
+    }
+}
+
+async fn list_templates(
+    State(state): State<AppState>,
+    Query(query): Query<TemplateListQuery>,
+    caller: Caller,
+) -> Response {
+    let tenant = caller.tenant(&state);
+    let mut templates: Vec<TemplateSummary> = state
         .render
         .templates()
         .iter()
-        .map(|t| TemplateSummary {
-            name: t.name().to_owned(),
-            kind: match t.manifest.kind {
-                TemplateKind::Wrapper => "wrapper",
-                TemplateKind::Data => "data",
-            },
-            version: t.manifest.version.clone(),
-            description: t.manifest.description.clone(),
-            data_fields: t.data_fields().into_iter().map(str::to_owned).collect(),
-            notice: t.manifest.notice.clone(),
-        })
+        .map(|template| template_summary(template.name().to_owned(), "baked", None, template))
         .collect();
-    Json(serde_json::json!({ "templates": templates }))
+    if query.include_ephemeral {
+        for entry in state.render.store().list(&tenant, Kind::Template) {
+            match state.render.template(&tenant, &entry.id) {
+                Ok(template) => templates.push(template_summary(
+                    entry.id,
+                    "ephemeral",
+                    Some(entry.expires_at),
+                    &template,
+                )),
+                Err(error) => return ApiError::from(error).into_response(),
+            }
+        }
+    }
+    Json(serde_json::json!({ "templates": templates })).into_response()
 }
 
-async fn get_template(State(state): State<AppState>, Path(name): Path<String>) -> Response {
-    let Some(template) = state.render.templates().get(&name) else {
-        return ApiError::unknown_template(&name, &state.render.templates().names())
-            .into_response();
+async fn get_template(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    caller: Caller,
+) -> Response {
+    let tenant = caller.tenant(&state);
+    let template = match state.render.template(&tenant, &name) {
+        Ok(template) => template,
+        Err(error) => return ApiError::from(error).into_response(),
     };
 
     Json(serde_json::json!({
@@ -301,6 +357,43 @@ async fn get_template(State(state): State<AppState>, Path(name): Path<String>) -
         "example_body": template.example_body(),
     }))
     .into_response()
+}
+
+async fn upload_template(
+    State(state): State<AppState>,
+    caller: Caller,
+    body: axum::body::Bytes,
+) -> Response {
+    let template =
+        match crate::templates::Template::from_archive(&body, state.config.max_bundle_bytes) {
+            Ok(template) => template,
+            Err(error) => return ApiError::from(error).into_response(),
+        };
+    let tenant = caller.tenant(&state);
+    match state
+        .render
+        .upload_template(&tenant, None, template.source_files(), &[])
+        .await
+    {
+        Ok(uploaded) => (StatusCode::CREATED, Json(uploaded)).into_response(),
+        Err(error) => ApiError::from(error).into_response(),
+    }
+}
+
+async fn delete_template(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    caller: Caller,
+) -> Response {
+    if state.render.templates().get(&id).is_some() {
+        return ApiError::forbidden("baked templates are immutable; change them in git")
+            .into_response();
+    }
+    let tenant = caller.tenant(&state);
+    match state.render.delete_template(&tenant, &id) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => ApiError::from(error).into_response(),
+    }
 }
 
 // -- assets ---------------------------------------------------------------------

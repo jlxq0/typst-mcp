@@ -303,6 +303,17 @@ impl Store {
         entries
     }
 
+    /// Delete one live entry belonging to `tenant`.
+    ///
+    /// The scoped key is checked before removal, so an id from another tenant is
+    /// indistinguishable from a missing id and an expired entry still reports 410.
+    pub fn delete(&self, tenant: &TenantId, kind: Kind, id: &str) -> Result<Entry, StoreError> {
+        let id = validate_id(kind, id)?;
+        let entry = self.check_live(tenant, kind, &id)?;
+        self.remove(tenant, kind, &id);
+        Ok(entry)
+    }
+
     /// Delete everything that has passed its TTL. Returns the number removed.
     pub fn reap(&self) -> usize {
         let now = now();
@@ -905,5 +916,34 @@ mod tests {
                 .windows(2)
                 .all(|w| w[0].created_at >= w[1].created_at)
         );
+    }
+
+    #[test]
+    fn delete_is_tenant_scoped_and_frees_the_exact_entry() {
+        let (_dir, store) = store(Limits::default());
+        let (alice, bob) = (tenant("alice"), tenant("bob"));
+        let entry = store
+            .put(
+                &alice,
+                Kind::Template,
+                "template.tar",
+                b"draft",
+                Meta::default(),
+            )
+            .expect("stores");
+
+        assert!(matches!(
+            store.delete(&bob, Kind::Template, &entry.id),
+            Err(StoreError::NotFound { .. })
+        ));
+        assert_eq!(store.used_bytes(), 5);
+        store
+            .delete(&alice, Kind::Template, &entry.id)
+            .expect("owner deletes");
+        assert_eq!(store.used_bytes(), 0);
+        assert!(matches!(
+            store.entry(&alice, Kind::Template, &entry.id),
+            Err(StoreError::NotFound { .. })
+        ));
     }
 }

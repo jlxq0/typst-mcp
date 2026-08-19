@@ -6,6 +6,7 @@
 //! actually goes wrong.
 
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use typst_mcp::config::Config;
@@ -95,6 +96,32 @@ impl TestServer {
         body: serde_json::Value,
     ) -> reqwest::Response {
         let mut request = self.client.post(self.url(path)).json(&body);
+        if let Some(key) = key {
+            request = request.bearer_auth(key);
+        }
+        request.send().await.expect("request")
+    }
+
+    async fn post_bytes(
+        &self,
+        path: &str,
+        key: Option<&str>,
+        content_type: &str,
+        body: Vec<u8>,
+    ) -> reqwest::Response {
+        let mut request = self
+            .client
+            .post(self.url(path))
+            .header("content-type", content_type)
+            .body(body);
+        if let Some(key) = key {
+            request = request.bearer_auth(key);
+        }
+        request.send().await.expect("request")
+    }
+
+    async fn delete(&self, path: &str, key: Option<&str>) -> reqwest::Response {
+        let mut request = self.client.delete(self.url(path));
         if let Some(key) = key {
             request = request.bearer_auth(key);
         }
@@ -239,6 +266,234 @@ async fn an_unknown_template_lists_what_is_available() {
             .any(|n| n == "hanso"),
         "the error should name the real templates: {body}"
     );
+}
+
+fn draft_template_archive() -> Vec<u8> {
+    let files = [
+        (
+            "template.toml",
+            "name = \"draft\"\nkind = \"wrapper\"\nentrypoint = \"draft.typ\"\nwrapper_fn = \"draft\"\ndescription = \"Ephemeral test\"\n",
+        ),
+        (
+            "draft.typ",
+            "#let draft(body) = { set page(width: 100mm, height: 100mm); body }\n",
+        ),
+        ("fixture.json", "{}\n"),
+        ("fixture.body.typ", "= Upload fixture\n\nIt compiles.\n"),
+    ];
+    let mut builder = tar::Builder::new(Vec::new());
+    for (path, text) in files {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(text.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, path, text.as_bytes())
+            .expect("tar member");
+    }
+    builder.into_inner().expect("tar")
+}
+
+fn gzip(bytes: &[u8]) -> Vec<u8> {
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(bytes).expect("gzip write");
+    encoder.finish().expect("gzip finish")
+}
+
+#[tokio::test]
+async fn ephemeral_templates_are_tenant_scoped_renderable_and_deletable() {
+    let server = TestServer::start().await;
+    let response = server
+        .post_bytes(
+            "/api/v1/templates",
+            Some(ALICE),
+            "application/x-tar",
+            draft_template_archive(),
+        )
+        .await;
+    assert_eq!(response.status(), 201);
+    let uploaded: serde_json::Value = response.json().await.expect("upload JSON");
+    let id = uploaded["id"].as_str().expect("template id");
+    assert!(id.starts_with("tpl_"));
+    assert_eq!(uploaded["name"], "draft");
+
+    let alice: serde_json::Value = server
+        .get("/api/v1/templates", Some(ALICE))
+        .await
+        .json()
+        .await
+        .expect("Alice list");
+    assert!(
+        alice["templates"]
+            .as_array()
+            .is_some_and(|templates| templates.iter().any(|t| t["id"] == id))
+    );
+    let bob: serde_json::Value = server
+        .get("/api/v1/templates", Some(BOB))
+        .await
+        .json()
+        .await
+        .expect("Bob list");
+    assert!(
+        bob["templates"]
+            .as_array()
+            .is_some_and(|templates| templates.iter().all(|t| t["id"] != id))
+    );
+    assert_eq!(
+        server
+            .get(&format!("/api/v1/templates/{id}"), Some(BOB))
+            .await
+            .status(),
+        404
+    );
+
+    let rendered = server
+        .post_json(
+            "/api/v1/render?output=pdf",
+            Some(ALICE),
+            serde_json::json!({
+                "template": id,
+                "body": "= Tenant draft\n\nRendered through its tpl id."
+            }),
+        )
+        .await;
+    assert_eq!(rendered.status(), 200);
+    assert!(rendered.bytes().await.expect("PDF").starts_with(b"%PDF-"));
+
+    assert_eq!(
+        server
+            .delete(&format!("/api/v1/templates/{id}"), Some(BOB))
+            .await
+            .status(),
+        404
+    );
+    assert_eq!(
+        server
+            .delete("/api/v1/templates/hanso", Some(ALICE))
+            .await
+            .status(),
+        403
+    );
+    assert_eq!(
+        server
+            .delete(&format!("/api/v1/templates/{id}"), Some(ALICE))
+            .await
+            .status(),
+        204
+    );
+}
+
+#[tokio::test]
+async fn template_expiry_and_quota_have_stable_statuses() {
+    let expired = TestServer::start_with(&[("TEMPLATE_TTL", "0s")]).await;
+    let response = expired
+        .post_bytes(
+            "/api/v1/templates",
+            Some(ALICE),
+            "application/x-tar",
+            draft_template_archive(),
+        )
+        .await;
+    assert_eq!(response.status(), 201);
+    let body: serde_json::Value = response.json().await.expect("upload JSON");
+    let id = body["id"].as_str().expect("id");
+    let gone = expired
+        .get(&format!("/api/v1/templates/{id}"), Some(ALICE))
+        .await;
+    assert_eq!(gone.status(), 410);
+    assert_eq!(
+        gone.json::<serde_json::Value>().await.unwrap()["error"],
+        "expired"
+    );
+
+    let full = TestServer::start_with(&[("MAX_TENANT_BYTES", "100")]).await;
+    let response = full
+        .post_bytes(
+            "/api/v1/templates",
+            Some(ALICE),
+            "application/x-tar",
+            draft_template_archive(),
+        )
+        .await;
+    assert_eq!(response.status(), 507);
+    assert_eq!(
+        response.json::<serde_json::Value>().await.unwrap()["error"],
+        "quota_exceeded"
+    );
+}
+
+#[tokio::test]
+async fn template_tar_traversal_is_rejected_before_storage() {
+    let server = TestServer::start().await;
+    let mut header = tar::Header::new_gnu();
+    let hostile = "../outside.typ";
+    header.as_mut_bytes()[..hostile.len()].copy_from_slice(hostile.as_bytes());
+    header.set_size(1);
+    header.set_mode(0o644);
+    header.set_cksum();
+    let mut builder = tar::Builder::new(Vec::new());
+    builder.append(&header, b"x" as &[u8]).expect("raw member");
+    let archive = builder.into_inner().expect("tar");
+
+    let before = server.store_bytes().await;
+    let response = server
+        .post_bytes(
+            "/api/v1/templates",
+            Some(ALICE),
+            "application/x-tar",
+            archive,
+        )
+        .await;
+    assert_eq!(response.status(), 422);
+    assert_eq!(server.store_bytes().await, before);
+}
+
+#[tokio::test]
+async fn gzip_template_uploads_work_and_broken_fixtures_are_not_stored() {
+    let server = TestServer::start().await;
+    let response = server
+        .post_bytes(
+            "/api/v1/templates",
+            Some(ALICE),
+            "application/gzip",
+            gzip(&draft_template_archive()),
+        )
+        .await;
+    assert_eq!(response.status(), 201);
+    let after_good = server.store_bytes().await;
+
+    let files = [
+        (
+            "template.toml",
+            "name = \"broken\"\nkind = \"wrapper\"\nentrypoint = \"broken.typ\"\nwrapper_fn = \"broken\"\n",
+        ),
+        ("broken.typ", "#let broken(body) = body\n"),
+        ("fixture.json", "{}\n"),
+        ("fixture.body.typ", "#let nope =\n"),
+    ];
+    let mut builder = tar::Builder::new(Vec::new());
+    for (path, text) in files {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(text.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, path, text.as_bytes())
+            .expect("tar member");
+    }
+    let broken = builder.into_inner().expect("tar");
+    let response = server
+        .post_bytes(
+            "/api/v1/templates",
+            Some(ALICE),
+            "application/x-tar",
+            broken,
+        )
+        .await;
+    assert_eq!(response.status(), 422);
+    let error: serde_json::Value = response.json().await.expect("error JSON");
+    assert_eq!(error["error"], "compile_failed");
+    assert_eq!(server.store_bytes().await, after_good);
 }
 
 #[tokio::test]
