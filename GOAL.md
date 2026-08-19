@@ -44,9 +44,10 @@ canonical OfficeMaster sources with schemas, realistic fixtures, licensed fonts 
 embedded-family assertions.
 The 15-family distributable font set is pinned and licence-verified in CI. Observability,
 including a separate bounded Prometheus listener, optional OTLP traces and envelope-only
-audit events, is implemented with content-leak tests. Freudenberg and release smoke/soak
-gates remain completion work. None of the current-main additions is production evidence
-until released.
+audit events, is implemented with content-leak tests. The ten-step smoke and exact-image CI
+gate are implemented and locally verified; Freudenberg, a green Forge run, and the complete
+10,000-compile soak remain release evidence. None of the current-main additions is
+production evidence until released.
 
 ## 2. Why in-process Typst rather than shelling out
 

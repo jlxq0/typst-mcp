@@ -21,7 +21,9 @@ Specs in `.spec/`, ordered tasks in `Plan.md`, success criteria in `GOAL.md`.
   texts; CI verifies the committed set offline.
   A separate `/metrics` listener, bounded Prometheus aggregates, optional OTLP tracing,
   and envelope-only audit events are implemented with content-leak regression tests.
-  Smoke/soak CI remains a Plan completion gap.
+  The ten-step smoke suite passes against the exact locally built linux/amd64 image, and
+  the workflow loads/smokes before tag publication. A green Forge run and one complete
+  10,000-filename soak remain release evidence.
 - The live store is a 5 GiB ReadWriteOnce PVC on one replica with `Recreate` rollout. It
   survives pod replacement; TTL and LRU quotas govern content, and PVC capacity is the
   final disk bound. It is still a re-creatable cache, not durable business storage.
@@ -33,6 +35,16 @@ Specs in `.spec/`, ordered tasks in `Plan.md`, success criteria in `GOAL.md`.
   against their final brand-local OfficeMaster paths; adding Freudenberg remains target work.
 
 ## Known Pitfalls
+
+- **Size worker memory from the final image, not an idle server.** Loading the complete
+  baked font set exercises a different address space from `/health` or an in-process unit
+  test. The linux/amd64 image died at a 512 MiB worker cap under arm emulation and passed
+  the full release smoke at 1 GiB; keep image smoke and pod headroom aligned. Found
+  2026-08-19.
+
+- **An expired signed link is 410, not 403.** Expiry is the same actionable `Gone`
+  condition used by stored objects; 403 is for an invalid live signature. Keep smoke and
+  deployment prose aligned with the HTTP regression. Found 2026-08-19.
 
 - **Length and character bounds do not make telemetry labels content-free.** A short
   alphanumeric template name can still carry customer data or a credential. Metrics and

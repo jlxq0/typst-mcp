@@ -5,6 +5,8 @@ on:
     branches: [main]
     tags: ["v*"]
   pull_request:
+  schedule:
+    - cron: "17 3 * * *"
 
 permissions:
   contents: read
@@ -74,12 +76,8 @@ jobs:
   docker:
     runs-on: ubuntu-22.04
     needs: cargo
-    # The gate is the image: nothing publishes that has not passed fmt, clippy,
-    # the full test suite, audit and deny. This was relaxed to `always()` while
-    # the runaway-compile test failed on Linux only (a memory-bomb fixture, see
-    # tests/sandbox.rs RUNAWAY) — v0.1.3/v0.1.4/v0.1.5 shipped through that hole.
-    # The test is fixed, so the gate is back.
-    if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+    # Build and smoke on every ref. A tag is only another name for the exact local
+    # image that passed this job; no second build occurs after the smoke gate.
     permissions: { contents: read, packages: write }
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
@@ -99,17 +97,15 @@ jobs:
           sudo tar -xz -C /usr/local --strip-components=0 -f "$TARBALL"
           rm -f "$TARBALL"
           buildctl --version
-      # Forgejo login only on trusted refs (main + tags). PR builds do
-      # a cold build with no buildcache import — slower, but no
-      # package-write PAT lands in the runner's docker config for a
-      # PR-triggered job to potentially exfiltrate.
+      # Forgejo login only on trusted refs. Pull requests build cold: no package-write
+      # credential or writable registry cache is exposed to untrusted code.
       - name: Login to Forgejo registry
         if: github.event_name != 'pull_request'
         run: |
           mkdir -p ~/.docker
           F_AUTH=$(printf "%s:%s" "jlxq0" "${{ secrets.FORGE_PUSH_TOKEN }}" | base64 -w0)
           echo "{\"auths\":{\"forge.oddie.app\":{\"auth\":\"$F_AUTH\"}}}" > ~/.docker/config.json
-      - name: Build (and push on tag)
+      - name: Build exact local image
         run: |
           set -euo pipefail
           # buildkitd runs on the runner host; from inside this job container the
@@ -120,26 +116,11 @@ jobs:
           export BUILDKIT_HOST="tcp://${GW}:1234"
           echo "buildkitd at ${BUILDKIT_HOST}"
           CACHE_REF="forge.oddie.app/jlxq0/typst-mcp:buildcache"
-          # Cache import/export only on trusted refs (main + release
-          # tags). PRs build cold — they can't poison the cache that
-          # the next tag build pulls, and they don't need the Forgejo
-          # PAT to be present in the runner's docker config.
           IMPORT_CACHE_ARG=()
           EXPORT_CACHE_ARG=()
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            V="${GITHUB_REF#refs/tags/}"
-            TAGS="forge.oddie.app/jlxq0/typst-mcp:${V},forge.oddie.app/jlxq0/typst-mcp:latest"
-            PUSH=true
+          if [[ "${GITHUB_EVENT_NAME}" != pull_request ]]; then
             IMPORT_CACHE_ARG=(--import-cache "type=registry,ref=${CACHE_REF}")
             EXPORT_CACHE_ARG=(--export-cache "type=registry,ref=${CACHE_REF},mode=max")
-          elif [[ "$GITHUB_REF" == refs/heads/main ]]; then
-            TAGS="forge.oddie.app/jlxq0/typst-mcp:ci-${GITHUB_SHA::8}"
-            PUSH=false
-            IMPORT_CACHE_ARG=(--import-cache "type=registry,ref=${CACHE_REF}")
-            EXPORT_CACHE_ARG=(--export-cache "type=registry,ref=${CACHE_REF},mode=max")
-          else
-            TAGS="forge.oddie.app/jlxq0/typst-mcp:ci-${GITHUB_SHA::8}"
-            PUSH=false
           fi
           buildctl build \
             --frontend dockerfile.v0 \
@@ -147,4 +128,106 @@ jobs:
             --local dockerfile=. \
             "${IMPORT_CACHE_ARG[@]}" \
             "${EXPORT_CACHE_ARG[@]}" \
-            --output "type=image,\"name=${TAGS}\",push=${PUSH}"
+            --output type=docker,name=typst-mcp:ci,dest=/tmp/typst-mcp-image.tar
+          docker load --input /tmp/typst-mcp-image.tar
+          docker image inspect typst-mcp:ci --format '{{.Id}}'
+      - name: Start disposable smoke stack
+        run: |
+          set -euo pipefail
+          STACK_ID="${GITHUB_RUN_ID:-run}-${GITHUB_RUN_ATTEMPT:-1}"
+          NETWORK="typst-mcp-smoke-${STACK_ID}"
+          APP_CONTAINER="typst-mcp-smoke-${STACK_ID}"
+          IDP_CONTAINER="typst-mcp-smoke-oidc-${STACK_ID}"
+          SMOKE_PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
+          BASE="http://localhost:${SMOKE_PORT}"
+          SMOKE_DIR="${RUNNER_TEMP}/typst-mcp-smoke-${STACK_ID}"
+          mkdir -p "$SMOKE_DIR"
+          chmod 700 "$SMOKE_DIR"
+          printf '%s\n' "$NETWORK" >"$SMOKE_DIR/network"
+          printf '%s\n' "$APP_CONTAINER" >"$SMOKE_DIR/app-container"
+          printf '%s\n' "$IDP_CONTAINER" >"$SMOKE_DIR/idp-container"
+          printf '%s\n' "$BASE" >"$SMOKE_DIR/base"
+          printf '%s\n' "$SMOKE_DIR" >"${RUNNER_TEMP}/typst-mcp-smoke-dir"
+          openssl rand -hex 32 >"$SMOKE_DIR/api-key"
+          openssl rand -hex 32 >"$SMOKE_DIR/other-api-key"
+          openssl rand -hex 32 >"$SMOKE_DIR/tenant-salt"
+          openssl rand -hex 32 >"$SMOKE_DIR/signing-secret"
+          chmod 600 "$SMOKE_DIR"/*
+
+          docker network create "$NETWORK"
+          scripts/prepare-smoke-oidc.sh \
+            "$SMOKE_DIR/oidc" "$SMOKE_DIR/token" \
+            http://oidc:8999 smoke-api smoke-tenant
+          docker run -d --name "$IDP_CONTAINER" \
+            --network "$NETWORK" --network-alias oidc \
+            --volume "$SMOKE_DIR/oidc:/www:ro" \
+            docker.io/library/busybox:1.37.0@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0 \
+            httpd -f -p 8999 -h /www
+          docker run -d --name "$APP_CONTAINER" \
+            --network "$NETWORK" \
+            --publish "127.0.0.1:${SMOKE_PORT}:3000" \
+            --tmpfs /data:uid=65532,gid=65532,mode=0700,size=1g \
+            --env TYPST_MCP_PUBLIC_URL="$BASE" \
+            --env TYPST_MCP_API_KEYS="smoke:$(cat "$SMOKE_DIR/api-key"),smoke-other:$(cat "$SMOKE_DIR/other-api-key")" \
+            --env TYPST_MCP_TENANT_SALT="$(cat "$SMOKE_DIR/tenant-salt")" \
+            --env TYPST_MCP_SIGNING_SECRET="$(cat "$SMOKE_DIR/signing-secret")" \
+            --env TYPST_MCP_OIDC_ISSUER=http://oidc:8999 \
+            --env TYPST_MCP_OIDC_AUDIENCE=smoke-api \
+            --env TYPST_MCP_OIDC_TENANT_ID=smoke-tenant \
+            --env TYPST_MCP_COMPILE_TIMEOUT=3s \
+            --env TYPST_MCP_MAX_CONCURRENT_COMPILES=2 \
+            --env TYPST_MCP_WORKER_MEMORY_BYTES=1073741824 \
+            typst-mcp:ci
+          for _ in $(seq 1 60); do
+            curl -fsS "$BASE/health" >/dev/null && exit 0
+            sleep 1
+          done
+          echo "smoke container did not become healthy" >&2
+          exit 1
+      - name: Smoke exact local image
+        run: |
+          set -euo pipefail
+          SMOKE_DIR="$(cat "${RUNNER_TEMP}/typst-mcp-smoke-dir")"
+          BASE="$(cat "$SMOKE_DIR/base")" \
+          API_KEY="$(cat "$SMOKE_DIR/api-key")" \
+          OTHER_API_KEY="$(cat "$SMOKE_DIR/other-api-key")" \
+          MCP_BEARER="$(cat "$SMOKE_DIR/token")" \
+          EXPECTED_VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)" \
+          HTTP_TIMEOUT=30 \
+          scripts/smoke.sh
+      - name: Nightly 10,000-filename soak
+        if: github.event_name == 'schedule'
+        run: |
+          set -euo pipefail
+          SMOKE_DIR="$(cat "${RUNNER_TEMP}/typst-mcp-smoke-dir")"
+          BASE="$(cat "$SMOKE_DIR/base")" \
+          API_KEY="$(cat "$SMOKE_DIR/api-key")" \
+          CONTAINER="$(cat "$SMOKE_DIR/app-container")" \
+          ITERATIONS=10000 \
+          scripts/soak.sh
+      - name: Collect smoke logs on failure
+        if: failure()
+        run: |
+          SMOKE_DIR="$(cat "${RUNNER_TEMP}/typst-mcp-smoke-dir" 2>/dev/null || true)"
+          if [[ -n "$SMOKE_DIR" && -f "$SMOKE_DIR/app-container" ]]; then
+            docker logs "$(cat "$SMOKE_DIR/app-container")" || true
+          fi
+      - name: Publish exact smoked image (tag only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -euo pipefail
+          V="${GITHUB_REF#refs/tags/}"
+          docker tag typst-mcp:ci "forge.oddie.app/jlxq0/typst-mcp:${V}"
+          docker tag typst-mcp:ci forge.oddie.app/jlxq0/typst-mcp:latest
+          docker push "forge.oddie.app/jlxq0/typst-mcp:${V}"
+          docker push forge.oddie.app/jlxq0/typst-mcp:latest
+      - name: Tear down smoke stack
+        if: always()
+        run: |
+          SMOKE_DIR="$(cat "${RUNNER_TEMP}/typst-mcp-smoke-dir" 2>/dev/null || true)"
+          if [[ -n "$SMOKE_DIR" && -d "$SMOKE_DIR" ]]; then
+            docker rm -f \
+              "$(cat "$SMOKE_DIR/app-container")" \
+              "$(cat "$SMOKE_DIR/idp-container")" || true
+            docker network rm "$(cat "$SMOKE_DIR/network")" || true
+          fi

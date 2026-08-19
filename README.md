@@ -18,7 +18,9 @@ frames with parent-staged path-only I/O, made direct-PDF responses no-store, uni
 mapping, added tenant-bound OIDC downloads, completed the MCP argument/filter surface, and
 isolated uploaded fonts to one job. It also exposes bounded Prometheus metrics on a
 separate listener, optionally exports OTLP traces, and emits content-free audit envelopes.
-The Freudenberg template and image smoke/soak gates remain implementation work;
+The exact linux/amd64 image now passes a ten-step local smoke suite, and CI builds/loads
+that image before any tag can be published. Freudenberg and the complete 10,000-compile
+soak remain completion work;
 deployed `v0.1.8` predates all current-main checkpoints. See `Plan.md` for the checklist.
 
 ## Shape (RFC 9728 / MCP authorization)
@@ -171,10 +173,11 @@ OIDC is optional locally. Production typically uses Entra only for `/mcp`.
 
 ## Image / CI
 
-Forgejo CI (`.forgejo/workflows/ci.yml`) runs fmt, clippy, test, audit and deny. On a `v*`
-tag it then builds and pushes `forge.oddie.app/jlxq0/typst-mcp:<tag>` with BuildKit.
-Building the image locally and running the complete smoke suite before push is still a
-required gate; current CI does not yet provide that guarantee.
+Forgejo CI (`.forgejo/workflows/ci.yml`) runs fmt, clippy, test, audit and deny, then builds
+a local linux/amd64 image tarball on every ref, loads it, and runs `scripts/smoke.sh` against
+that exact image. Only a `v*` tag can add registry tags and push the already-smoked image to
+`forge.oddie.app/jlxq0/typst-mcp`; no post-smoke rebuild occurs. A nightly scheduled run
+also executes the 10,000-distinct-filename RSS soak.
 
 ```sh
 docker run --rm -p 3000:3000 \

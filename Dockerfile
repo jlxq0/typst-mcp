@@ -11,6 +11,13 @@ ARG RUST_VERSION=1.93
 #   TOKEN=$(curl -s "https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/rust:pull" | jq -r .token)
 #   curl -sI -H "Accept: application/vnd.oci.image.index.v1+json" -H "Authorization: Bearer $TOKEN" \
 #     "https://registry-1.docker.io/v2/library/rust/manifests/${RUST_VERSION}-bookworm" | grep docker-content-digest
+FROM rust:${RUST_VERSION}-bookworm@sha256:7c4ae649a84014c467d79319bbf17ce2632ae8b8be123ac2fb2ea5be46823f31 AS assets
+
+WORKDIR /assets
+COPY fonts ./fonts
+COPY scripts/fetch-fonts.sh ./scripts/fetch-fonts.sh
+RUN ./scripts/fetch-fonts.sh --verify-only
+
 FROM rust:${RUST_VERSION}-bookworm@sha256:7c4ae649a84014c467d79319bbf17ce2632ae8b8be123ac2fb2ea5be46823f31 AS builder
 
 WORKDIR /build
@@ -36,12 +43,12 @@ FROM gcr.io/distroless/cc-debian12:nonroot@sha256:e2d29aec8061843706b7e484c444f7
 WORKDIR /app
 COPY --from=builder /build/target/release/typst-mcp /app/typst-mcp
 COPY templates /usr/share/typst-mcp/templates
-COPY fonts /usr/share/fonts/typst
+COPY --from=assets /assets/fonts /usr/share/fonts/typst
 
 # Non-root by default (distroless `nonroot` user, UID 65532). Matches
 # a typical PSS-restricted Kubernetes security context (no privilege
 # escalation, drop ALL capabilities, read-only root filesystem).
 USER nonroot:nonroot
 
-EXPOSE 3000
+EXPOSE 3000 9090
 ENTRYPOINT ["/app/typst-mcp"]

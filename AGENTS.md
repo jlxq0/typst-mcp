@@ -48,6 +48,17 @@
   opaque server-generated ids before emitting them, and exercise every string-shaped
   audit field with content and credential canaries.
 
+- **Expired and invalid signed links are different public errors.** Expiry is actionable
+  and returns `410 Gone` consistently with stored-object expiry; a bad signature on a
+  still-live link is `403 Forbidden`. Smoke tests and runbooks must not collapse both into
+  403 or they contradict the API contract they are meant to verify.
+
+- **Worker memory must be tested in the final image with the full font set.** Unit tests
+  and an idle health check do not load the same address space as a branded compile. The
+  linux/amd64 image with all 15 families died at a 512 MiB `RLIMIT_AS` under arm emulation
+  and passed at 1 GiB; keep the release smoke on the exact image and size the pod above
+  `concurrency × worker limit` plus the server.
+
 - **Classify a domain failure once, before choosing HTTP or MCP transport.** Separate
   surface mappings made an oversized bundle a REST 422 while the specification required
   413, and some MCP failures were returned as success-shaped JSON. Route auth, render,
