@@ -10,12 +10,12 @@ Self-host the `/mcp` endpoint on your own domain.
 ## Status
 
 Production currently runs `v0.1.8` at `https://typst-mcp.hanso.group`. It ships one
-Hanso template and seven MCP tools. Current `main` ships Hanso and KSC and exposes the full eight-tool surface,
-including text-only `typst_upload_template`, and adds tenant-scoped ephemeral template
+Hanso template and seven MCP tools. Current `main` ships Hanso, KSC and Lenno and exposes
+the full eight-tool surface, including text-only `typst_upload_template`, and adds tenant-scoped ephemeral template
 resolution plus safe REST tar/gzip upload and deletion. It has also replaced bulk worker
 frames with parent-staged path-only I/O, made direct-PDF responses no-store, unified error
 mapping, added tenant-bound OIDC downloads, completed the MCP argument/filter surface, and
-isolated uploaded fonts to one job. Metrics/OTLP, the Lenno/Freudenberg templates, and image
+isolated uploaded fonts to one job. Metrics/OTLP, the Freudenberg template, and image
 smoke/soak gates remain implementation work;
 deployed `v0.1.8` predates all current-main checkpoints. See `Plan.md` for the checklist.
 

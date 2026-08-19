@@ -59,10 +59,10 @@ fn the_brand_font_is_available() {
             .take(20)
             .collect::<Vec<_>>()
     );
-    for family in ["Inter", "Passion One"] {
+    for family in ["Inter", "Passion One", "Roboto", "Space Grotesk"] {
         assert!(
             fonts.has_family(family),
-            "{family} is not in the baked font set; KSC documents would fall back"
+            "{family} is not in the baked font set; a branded document would fall back"
         );
     }
 }
@@ -160,6 +160,32 @@ fn the_ksc_template_embeds_both_brand_families() {
         );
     }
     assert!(out.pages >= 3, "expected KSC cover, contents and body");
+}
+
+#[test]
+fn the_lenno_template_embeds_both_brand_families() {
+    let set = templates();
+    let template = set
+        .get("lenno")
+        .expect("the Lenno template must be present");
+    let assembled = template
+        .assemble(
+            template.example().expect("Lenno fixture"),
+            template.example_body(),
+            vec![],
+            8 * 1024 * 1024,
+        )
+        .expect("Lenno assembles");
+    let out = compile(&assembled.bundle, fonts(), &CompileOptions::default())
+        .unwrap_or_else(|e| panic!("Lenno compile failed: {e}\n{:#?}", e.diagnostics()));
+    let pdf = String::from_utf8_lossy(&out.pdf);
+    for family in ["Roboto", "SpaceGrotesk"] {
+        assert!(
+            pdf.contains(family),
+            "Lenno PDF has no embedded {family} subset"
+        );
+    }
+    assert!(out.pages >= 3, "expected Lenno cover, contents and body");
 }
 
 #[test]

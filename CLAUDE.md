@@ -15,19 +15,19 @@ Specs in `.spec/`, ordered tasks in `Plan.md`, success criteria in `GOAL.md`.
   OIDC bearer downloads with signed-link outage fallback, the eighth text-only
   `typst_upload_template` tool, tenant-scoped ephemeral resolution, and REST tar/gzip
   template upload/deletion. Full compile/render arguments, asset roles/filters, and
-  RAII-workspace-scoped uploaded fonts are also implemented. KSC is vendored from the
-  canonical OfficeMaster commit with its schema, safe fixture and licensed brand fonts.
+  RAII-workspace-scoped uploaded fonts are also implemented. KSC and Lenno are vendored
+  from canonical OfficeMaster commits with schemas, safe fixtures and licensed brand fonts.
   Metrics/OTLP/audit and smoke/soak CI remain Plan completion gaps.
 - The live store is a 5 GiB ReadWriteOnce PVC on one replica with `Recreate` rollout. It
   survives pod replacement; TTL and LRU quotas govern content, and PVC capacity is the
   final disk bound. It is still a re-creatable cache, not durable business storage.
-- OfficeMaster currently has the canonical Hanso library at `typst/hanso.typ` and a pushed
-  KSC implementation at `brands/ksc/typst/ksc.typ` on `feat/ksc-typst-template`. Lenno and
-  Freudenberg have briefs/masters but no completed Typst library. Preserve the unrelated
+- OfficeMaster currently has the canonical Hanso library at `typst/hanso.typ` and pushed
+  KSC and Lenno implementations under `brands/<brand>/typst/` on
+  `feat/ksc-typst-template`. Freudenberg has a brief/master but no completed Typst library. Preserve the unrelated
   dirty Freudenberg worktree; never fold it into a template sync accidentally.
-- `scripts/sync-templates.sh` currently vendors Hanso only. Adding KSC and moving Hanso to
-  its final brand-local home are target work; `templates/UPSTREAM` records the source
-  commit, and CI drift checking is not complete yet.
+- `scripts/sync-templates.sh` vendors Hanso, KSC and Lenno. Trusted CI checks all three
+  against OfficeMaster; moving Hanso to its final brand-local home and adding Freudenberg
+  remain target work.
 
 ## Known Pitfalls
 

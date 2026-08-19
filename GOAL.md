@@ -39,9 +39,9 @@ and **seven** MCP tools. Current `main` has completed the eighth text-only
 `typst_upload_template` tool, tenant-scoped ephemeral resolution, safe REST tar/gzip upload
 and deletion, path-only worker I/O, true no-store direct PDF, shared sanitized HTTP/MCP
 errors, tenant-bound OIDC downloads, full compile/render arguments, asset role filters and
-per-job uploaded fonts without cross-job leakage. KSC is now vendored from its canonical
-OfficeMaster source with a schema, generic fixture and licensed Inter/Passion One fonts.
-Observability, Lenno/Freudenberg, and release smoke/soak gates remain completion work. None of the current-main
+per-job uploaded fonts without cross-job leakage. KSC and Lenno are now vendored from their
+canonical OfficeMaster sources with schemas, realistic fixtures, licensed fonts and embedded-family assertions.
+Observability, Freudenberg, and release smoke/soak gates remain completion work. None of the current-main
 additions is production evidence until released.
 
 ## 2. Why in-process Typst rather than shelling out

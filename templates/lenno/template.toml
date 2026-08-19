@@ -1,0 +1,67 @@
+# Lenno agent-orchestration document.
+#
+# The Typst library is vendored byte-for-byte from OfficeMaster. This manifest and
+# fixture are typst-mcp integration metadata.
+
+name = "lenno"
+kind = "wrapper"
+version = "1.0.0"
+description = """
+Lenno technical document - near-black or warm light ground, restrained orange accents, \
+live-text Lenno wordmark, Space Grotesk display type, Roboto body type, and full or \
+simple operational footers."""
+entrypoint = "lenno.typ"
+wrapper_fn = "lenno-doc"
+
+[args.title]
+arg = "title"
+type = "str"
+
+[args.subtitle]
+arg = "subtitle"
+type = "str"
+
+[args.recipient]
+arg = "recipient"
+type = "str"
+
+[args.author]
+arg = "author"
+type = "str"
+
+[args.date]
+arg = "date"
+type = "date"
+
+[args.theme]
+arg = "theme"
+type = "ident"
+map = { light = "light-theme", dark = "dark-theme" }
+
+[args.footer_style]
+arg = "footer-style"
+type = "str"
+
+[args.org]
+arg = "org"
+type = "str"
+
+[args.email]
+arg = "email"
+type = "str"
+
+[args.web]
+arg = "web"
+type = "str"
+
+[args.support]
+arg = "support"
+type = "str"
+
+[args.confidentiality]
+arg = "confidentiality"
+type = "str"
+
+[args.contents]
+arg = "contents"
+type = "bool"

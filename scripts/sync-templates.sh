@@ -25,11 +25,12 @@ fi
 
 # brand -> the brand's Typst library within OfficeMaster.
 #
-# `hanso` currently lives in the standalone typst/ directory; the remaining brands will
-# land under brands/<name>/typst/ as they are ported. Add a line per brand.
+# `hanso` currently lives in the standalone typst/ directory; the remaining brands live
+# under brands/<name>/typst/. Add a line per brand.
 BRANDS=(
   "hanso:typst/hanso.typ"
   "ksc:brands/ksc/typst/ksc.typ"
+  "lenno:brands/lenno/typst/lenno.typ"
 )
 
 fail=0

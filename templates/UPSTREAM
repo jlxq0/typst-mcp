@@ -8,7 +8,8 @@
 # To update: edit the canonical copy, then re-run scripts/sync-templates.sh.
 
 repo = git@forge.oddie.app:thehansogroup/OfficeMaster.git
-commit = ff0f4640d985f39a8a08d432394733a1cd3b93e1
+commit = 7063930c0f1b8a21e12730ea31282cfef51da4c9
 hanso = typst/hanso.typ
 ksc = brands/ksc/typst/ksc.typ
+lenno = brands/lenno/typst/lenno.typ
 synced = 2026-08-19

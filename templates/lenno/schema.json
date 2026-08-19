@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Lenno technical document",
+  "description": "Metadata for a Lenno-branded operational or technical document.",
+  "type": "object",
+  "required": ["title"],
+  "additionalProperties": false,
+  "properties": {
+    "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "subtitle": { "type": "string", "maxLength": 240 },
+    "recipient": { "type": "string", "maxLength": 160 },
+    "author": { "type": "string", "maxLength": 160 },
+    "date": {
+      "type": "string",
+      "format": "date",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+    },
+    "theme": { "enum": ["light", "dark"], "default": "dark" },
+    "footer_style": { "enum": ["full", "simple"], "default": "full" },
+    "org": { "type": "string", "maxLength": 160 },
+    "email": { "type": "string", "maxLength": 160 },
+    "web": { "type": "string", "maxLength": 160 },
+    "support": { "type": "string", "maxLength": 160 },
+    "confidentiality": { "type": "string", "maxLength": 160 },
+    "contents": { "type": "boolean", "default": true }
+  }
+}
