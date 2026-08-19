@@ -175,6 +175,8 @@ pub enum TemplateError {
     BadWrapperFn { name: String, value: String },
     #[error("template file {0:?} uses the reserved `__` prefix")]
     ReservedName(String),
+    #[error("template has no file {0:?} to override")]
+    UnknownOverride(String),
     #[error("template metadata file {0:?} must be UTF-8 text")]
     NonTextMetadata(String),
     #[error("uploaded template name {requested:?} does not match manifest name {manifest:?}")]
@@ -557,6 +559,21 @@ impl Template {
         extra: Vec<BundleFile>,
         max_bytes: usize,
     ) -> Result<Assembled, TemplateError> {
+        self.assemble_with_overrides(data, body, extra, Vec::new(), max_bytes)
+    }
+
+    /// Build a bundle while replacing explicitly named template files.
+    ///
+    /// Overrides may only replace an existing source. Requiring that match prevents a
+    /// typo from silently adding a dead file and claiming the customization worked.
+    pub fn assemble_with_overrides(
+        &self,
+        data: &serde_json::Value,
+        body: Option<&str>,
+        extra: Vec<BundleFile>,
+        overrides: Vec<BundleFile>,
+        max_bytes: usize,
+    ) -> Result<Assembled, TemplateError> {
         self.validate(data)?;
 
         match (self.manifest.kind, body) {
@@ -578,6 +595,24 @@ impl Template {
         }
 
         let mut files = self.files.clone();
+        for override_file in overrides {
+            if override_file.path.starts_with(RESERVED_PREFIX) {
+                return Err(TemplateError::ReservedName(override_file.path));
+            }
+            let path =
+                normalise_path(&override_file.path).map_err(|source| TemplateError::BadPath {
+                    name: self.manifest.name.clone(),
+                    path: override_file.path.clone(),
+                    source,
+                })?;
+            let Some(existing) = files.iter_mut().find(|file| file.path == path) else {
+                return Err(TemplateError::UnknownOverride(path));
+            };
+            *existing = BundleFile {
+                path,
+                content: override_file.content,
+            };
+        }
         let mut source_map = SourceMap::default();
         files.extend(extra);
         files.push(BundleFile::text(GENERATED_MAIN, self.generate_main(data)?));
@@ -1332,6 +1367,37 @@ type = "strings"
         assert!(matches!(
             Template::from_archive(&bytes, 1024),
             Err(TemplateError::NonFileMember { .. })
+        ));
+    }
+
+    #[test]
+    fn overrides_replace_existing_sources_and_reject_typos() {
+        let dir = tempfile::tempdir().unwrap();
+        wrapper_template(dir.path());
+        let template = Template::load(dir.path()).expect("template");
+        let replacement = "#let demo-doc(body, ..args) = { set text(fill: red); body }";
+        let assembled = template
+            .assemble_with_overrides(
+                &serde_json::json!({ "title": "Override" }),
+                Some("Body"),
+                vec![],
+                vec![BundleFile::text("demo.typ", replacement)],
+                1 << 20,
+            )
+            .expect("override");
+        assert!(assembled.bundle.files().any(|(path, content)| {
+            path == "demo.typ" && content.as_bytes() == replacement.as_bytes()
+        }));
+
+        assert!(matches!(
+            template.assemble_with_overrides(
+                &serde_json::json!({ "title": "Override" }),
+                Some("Body"),
+                vec![],
+                vec![BundleFile::text("typo.typ", replacement)],
+                1 << 20,
+            ),
+            Err(TemplateError::UnknownOverride(path)) if path == "typo.typ"
         ));
     }
 

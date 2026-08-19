@@ -672,6 +672,38 @@ async fn rendering_returns_a_link_and_an_image_the_model_can_see() {
 }
 
 #[tokio::test]
+async fn mcp_compile_accepts_multifile_data_inputs_and_main() {
+    let server = TestServer::start().await;
+    let token = server.idp.token("alice");
+    let result = server
+        .call(
+            &token,
+            "tools/call",
+            serde_json::json!({
+                "name": "typst_compile",
+                "arguments": {
+                    "files": [
+                        {
+                            "path": "document.typ",
+                            "text": "#let data = json(\"data.json\")\n= #data.title\n#include \"part.typ\"\n#sys.inputs.at(\"locale\")"
+                        },
+                        { "path": "part.typ", "text": "== Included file\n" }
+                    ],
+                    "main": "document.typ",
+                    "data": { "title": "Complete MCP shape" },
+                    "inputs": { "locale": "de-SG" },
+                    "preview_pages": [1]
+                }
+            }),
+        )
+        .await;
+
+    assert_eq!(result["isError"], false, "{result}");
+    assert_eq!(images_in(&result).len(), 1);
+    assert!(text_of(&result).contains("job_id"));
+}
+
+#[tokio::test]
 async fn an_oidc_bearer_fetches_only_its_own_pdf_and_preview() {
     let server = TestServer::start().await;
     let alice = server.idp.token("alice");

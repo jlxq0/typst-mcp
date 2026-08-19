@@ -793,6 +793,74 @@ async fn an_asset_can_be_uploaded_and_used_in_a_document() {
 }
 
 #[tokio::test]
+async fn an_uploaded_font_is_available_to_one_job_only() {
+    let server = TestServer::start_with(&[("FONT_DIRS", "")]).await;
+    let font = std::fs::read(repo("fonts/Figtree-Regular.ttf")).expect("font fixture");
+    let response = server
+        .post_bytes(
+            "/api/v1/assets?path=fonts/Figtree-Regular.ttf&kind=font",
+            Some(ALICE),
+            "font/ttf",
+            font,
+        )
+        .await;
+    assert_eq!(response.status(), 200);
+    let uploaded: serde_json::Value = response.json().await.expect("upload JSON");
+    assert_eq!(uploaded["kind"], "font");
+    let id = uploaded["id"].as_str().expect("font id");
+
+    let listed: serde_json::Value = server
+        .get("/api/v1/assets?kind=font&limit=1", Some(ALICE))
+        .await
+        .json()
+        .await
+        .expect("font list");
+    assert_eq!(listed["total"], 1);
+    assert_eq!(listed["assets"][0]["id"], id);
+    assert_eq!(listed["assets"][0]["kind"], "font");
+
+    let source = "#set text(font: \"Figtree\")\n= Per-job font";
+    let with_font: serde_json::Value = server
+        .post_json(
+            "/api/v1/compile",
+            Some(ALICE),
+            serde_json::json!({ "source": source, "assets": [id], "preview_pages": [] }),
+        )
+        .await
+        .json()
+        .await
+        .expect("compile with font");
+    assert!(
+        with_font.get("diagnostics").is_none()
+            || with_font["diagnostics"]
+                .as_array()
+                .is_some_and(Vec::is_empty),
+        "uploaded Figtree did not resolve: {with_font}"
+    );
+
+    let without_font: serde_json::Value = server
+        .post_json(
+            "/api/v1/compile",
+            Some(ALICE),
+            serde_json::json!({ "source": source, "preview_pages": [] }),
+        )
+        .await
+        .json()
+        .await
+        .expect("compile without font");
+    assert!(
+        without_font["diagnostics"]
+            .as_array()
+            .is_some_and(
+                |diagnostics| diagnostics.iter().any(|diagnostic| diagnostic["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("unknown font family")))
+            ),
+        "the font leaked into a later job: {without_font}"
+    );
+}
+
+#[tokio::test]
 async fn repeated_asset_ids_are_rejected_before_reading_asset_bytes() {
     let server = TestServer::start().await;
     let uploaded: serde_json::Value = server

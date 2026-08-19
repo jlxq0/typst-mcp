@@ -39,6 +39,9 @@ pub struct RenderRequest {
     /// Typst markup for a wrapper template to wrap.
     #[serde(default)]
     pub body: Option<String>,
+    /// Text replacements for existing files inside a named template.
+    #[serde(default)]
+    pub overrides: Vec<InputFile>,
 
     /// Shorthand for a single `main.typ`.
     #[serde(default)]
@@ -120,6 +123,8 @@ pub enum RenderError {
     Ambiguous,
     #[error("nothing to render: provide `template`, `source`, or `files`")]
     Empty,
+    #[error("`overrides` can only be used with a named template")]
+    OverridesWithoutTemplate,
     #[error("duplicate asset id {0:?}")]
     DuplicateAsset(String),
     #[error(transparent)]
@@ -403,6 +408,9 @@ impl RenderService {
             (None, false) => return Err(RenderError::Empty),
             _ => {}
         }
+        if request.template.is_none() && !request.overrides.is_empty() {
+            return Err(RenderError::OverridesWithoutTemplate);
+        }
 
         let assets = self.load_assets(tenant, &request.assets)?;
 
@@ -413,8 +421,22 @@ impl RenderService {
                 TemplateKind::Wrapper => request.body.as_deref(),
                 TemplateKind::Data => None,
             };
-            let assembled = template.assemble(&data, body, assets, self.config.max_bundle_bytes)?;
-            return Ok((assembled.bundle, assembled.source_map));
+            let overrides = request
+                .overrides
+                .iter()
+                .map(|file| BundleFile::text(&file.path, &file.text))
+                .collect();
+            let assembled = template.assemble_with_overrides(
+                &data,
+                body,
+                assets,
+                overrides,
+                self.config.max_bundle_bytes,
+            )?;
+            return Ok((
+                assembled.bundle.with_inputs(request.inputs.clone()),
+                assembled.source_map,
+            ));
         }
 
         let mut files: Vec<BundleFile> = assets;
@@ -423,6 +445,12 @@ impl RenderService {
         }
         for file in &request.files {
             files.push(BundleFile::text(&file.path, &file.text));
+        }
+        if let Some(data) = &request.data {
+            files.push(BundleFile::text(
+                "data.json",
+                serde_json::to_string(data).unwrap_or_else(|_| "{}".into()),
+            ));
         }
         let main = request.main.clone().unwrap_or_else(|| "main.typ".into());
         let bundle = Bundle::new(

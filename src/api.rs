@@ -18,7 +18,7 @@ use crate::oauth_proxy::{self, OAuthProxyState};
 use crate::principal::TenantId;
 use crate::render::{DOCUMENT_NAME, RenderRequest, RenderService};
 use crate::signing::SignatureError;
-use crate::store::{Kind, Meta};
+use crate::store::{AssetRole, Entry, Kind, Meta};
 use crate::templates::TemplateKind;
 
 /// Everything the handlers share.
@@ -402,6 +402,9 @@ async fn delete_template(
 struct UploadQuery {
     /// The bundle path the asset is mounted at, e.g. `assets/logo.png`.
     path: String,
+    /// `image`, `font`, or `data`. Inferred from path/content type when omitted.
+    #[serde(default)]
+    kind: Option<String>,
 }
 
 async fn upload_asset(
@@ -424,6 +427,16 @@ async fn upload_asset(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("application/octet-stream")
         .to_owned();
+    let asset_role = match query.kind.as_deref() {
+        Some(value) => match parse_asset_role(value) {
+            Some(role) => role,
+            None => {
+                return ApiError::bad_request("kind must be `image`, `font`, or `data`")
+                    .into_response();
+            }
+        },
+        None => infer_asset_role(&path, &content_type),
+    };
 
     let tenant = caller.tenant(&state);
     match state.render.store().put(
@@ -434,12 +447,14 @@ async fn upload_asset(
         Meta {
             filename: Some(path.clone()),
             content_type: Some(content_type.clone()),
+            asset_role: Some(asset_role),
         },
     ) {
         Ok(entry) => Json(serde_json::json!({
             "id": entry.id,
             "path": path,
             "content_type": content_type,
+            "kind": asset_role.as_str(),
             "bytes": entry.bytes,
             "expires_at": entry.expires_at,
         }))
@@ -448,11 +463,87 @@ async fn upload_asset(
     }
 }
 
-async fn list_assets(State(state): State<AppState>, caller: Caller) -> Json<serde_json::Value> {
+#[derive(Debug, Deserialize)]
+struct AssetListQuery {
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+async fn list_assets(
+    State(state): State<AppState>,
+    Query(query): Query<AssetListQuery>,
+    caller: Caller,
+) -> Response {
     let tenant = caller.tenant(&state);
-    Json(serde_json::json!({
-        "assets": state.render.store().list(&tenant, Kind::Asset),
-    }))
+    let filter = match query.kind.as_deref() {
+        Some(value) => match parse_asset_role(value) {
+            Some(role) => Some(role),
+            None => {
+                return ApiError::bad_request("kind must be `image`, `font`, or `data`")
+                    .into_response();
+            }
+        },
+        None => None,
+    };
+    let limit = query.limit.unwrap_or(100).min(1000);
+    let mut assets: Vec<_> = state
+        .render
+        .store()
+        .list(&tenant, Kind::Asset)
+        .into_iter()
+        .filter(|entry| filter.is_none_or(|role| entry_role(entry) == role))
+        .map(asset_json)
+        .collect();
+    let total = assets.len();
+    assets.truncate(limit);
+    Json(serde_json::json!({ "total": total, "assets": assets })).into_response()
+}
+
+fn parse_asset_role(value: &str) -> Option<AssetRole> {
+    match value {
+        "image" => Some(AssetRole::Image),
+        "font" => Some(AssetRole::Font),
+        "data" => Some(AssetRole::Data),
+        _ => None,
+    }
+}
+
+fn infer_asset_role(path: &str, content_type: &str) -> AssetRole {
+    let extension = path.rsplit('.').next().unwrap_or_default();
+    if matches!(
+        extension.to_ascii_lowercase().as_str(),
+        "ttf" | "otf" | "ttc"
+    ) {
+        AssetRole::Font
+    } else if content_type.starts_with("image/") {
+        AssetRole::Image
+    } else {
+        AssetRole::Data
+    }
+}
+
+fn entry_role(entry: &Entry) -> AssetRole {
+    entry.asset_role.unwrap_or_else(|| {
+        infer_asset_role(
+            entry.filename.as_deref().unwrap_or_default(),
+            entry.content_type.as_deref().unwrap_or_default(),
+        )
+    })
+}
+
+fn asset_json(entry: Entry) -> serde_json::Value {
+    let role = entry_role(&entry).as_str();
+    serde_json::json!({
+        "id": entry.id,
+        "filename": entry.filename,
+        "content_type": entry.content_type,
+        "bytes": entry.bytes,
+        "kind": role,
+        "created_at": entry.created_at,
+        "expires_at": entry.expires_at,
+    })
 }
 
 // -- fonts ----------------------------------------------------------------------

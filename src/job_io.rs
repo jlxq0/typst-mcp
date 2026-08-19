@@ -43,7 +43,7 @@ impl PreparedJob {
     pub fn stage(
         workspace_parent: &Path,
         bundle: &Bundle,
-        font_dirs: Vec<PathBuf>,
+        mut font_dirs: Vec<PathBuf>,
         limits: JobLimits,
     ) -> io::Result<Self> {
         std::fs::create_dir_all(workspace_parent)?;
@@ -57,11 +57,30 @@ impl PreparedJob {
         std::fs::create_dir(&output_dir)?;
 
         let mut files = Vec::with_capacity(bundle.len());
+        let mut uploaded_font_dir = None;
         for (index, (path, content)) in bundle.files().enumerate() {
             // Never use a caller's virtual path as a host path. Numeric staging names
             // make traversal impossible even if a future caller bypasses Bundle.
             let source = input_dir.join(index.to_string());
             std::fs::write(&source, content.as_bytes())?;
+            if is_font_path(path) {
+                let dir = match &uploaded_font_dir {
+                    Some(dir) => dir,
+                    None => {
+                        let dir = workspace.path().join("fonts");
+                        std::fs::create_dir(&dir)?;
+                        uploaded_font_dir.insert(dir)
+                    }
+                };
+                let extension = Path::new(path)
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .unwrap_or("ttf");
+                std::fs::write(
+                    dir.join(format!("{index}.{}", extension.to_ascii_lowercase())),
+                    content.as_bytes(),
+                )?;
+            }
             let kind = match content {
                 FileContent::Text(_) => JobFileKind::Text,
                 FileContent::Binary(_) => JobFileKind::Binary,
@@ -71,6 +90,9 @@ impl PreparedJob {
                 source,
                 kind,
             });
+        }
+        if let Some(dir) = uploaded_font_dir {
+            font_dirs.push(dir);
         }
 
         Ok(Self {
@@ -122,6 +144,18 @@ impl PreparedJob {
             .collect::<io::Result<Vec<_>>>()?;
         Ok(JobOutputs { pdf, previews })
     }
+}
+
+fn is_font_path(path: &str) -> bool {
+    Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "ttf" | "otf" | "ttc"
+            )
+        })
 }
 
 impl AsRef<Job> for PreparedJob {

@@ -38,9 +38,10 @@ same-origin DCR/OAuth bridge, tenant-scoped assets/outputs, signed links, Hanso 
 and **seven** MCP tools. Current `main` has completed the eighth text-only
 `typst_upload_template` tool, tenant-scoped ephemeral resolution, safe REST tar/gzip upload
 and deletion, path-only worker I/O, true no-store direct PDF, shared sanitized HTTP/MCP
-errors, and tenant-bound OIDC downloads. Per-job uploaded fonts, observability, the
-remaining three brands, and release smoke/soak gates remain completion work. None of the
-current-main additions is production evidence until released.
+errors, tenant-bound OIDC downloads, full compile/render arguments, asset role filters and
+per-job uploaded fonts without cross-job leakage. Observability, the remaining three
+brands, and release smoke/soak gates remain completion work. None of the current-main
+additions is production evidence until released.
 
 ## 2. Why in-process Typst rather than shelling out
 

@@ -114,6 +114,7 @@ pub enum StoreError {
 pub struct Meta {
     pub filename: Option<String>,
     pub content_type: Option<String>,
+    pub asset_role: Option<AssetRole>,
 }
 
 impl Meta {
@@ -121,6 +122,31 @@ impl Meta {
         Self {
             filename: Some(filename.into()),
             content_type: Some(content_type.into()),
+            asset_role: None,
+        }
+    }
+
+    pub fn with_asset_role(mut self, role: AssetRole) -> Self {
+        self.asset_role = Some(role);
+        self
+    }
+}
+
+/// How an uploaded asset is intended to be used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AssetRole {
+    Image,
+    Font,
+    Data,
+}
+
+impl AssetRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Image => "image",
+            Self::Font => "font",
+            Self::Data => "data",
         }
     }
 }
@@ -138,6 +164,8 @@ pub struct Entry {
     pub filename: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asset_role: Option<AssetRole>,
 }
 
 impl Entry {
@@ -236,6 +264,7 @@ impl Store {
             expires_at: now + self.limits.ttl(kind).as_secs(),
             filename: meta.filename,
             content_type: meta.content_type,
+            asset_role: meta.asset_role,
         };
         self.write_meta(&dir, &entry)?;
 

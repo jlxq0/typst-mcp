@@ -222,6 +222,7 @@ impl From<TemplateError> for ApiError {
             | TemplateError::NoWrapperFn { .. }
             | TemplateError::BadWrapperFn { .. }
             | TemplateError::ReservedName(_)
+            | TemplateError::UnknownOverride(_)
             | TemplateError::NonTextMetadata(_)
             | TemplateError::NameMismatch { .. }
             | TemplateError::NonFileMember { .. }
@@ -248,7 +249,9 @@ impl From<RenderError> for ApiError {
                     .collect();
                 Self::unknown_template(&name, &names)
             }
-            RenderError::Ambiguous | RenderError::Empty => Self::bad_request(error.to_string()),
+            RenderError::Ambiguous | RenderError::Empty | RenderError::OverridesWithoutTemplate => {
+                Self::bad_request(error.to_string())
+            }
             RenderError::DuplicateAsset(_) => Self::new(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 ErrorCode::InvalidBundle,

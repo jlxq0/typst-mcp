@@ -8,6 +8,7 @@
 //! Every tool goes through [`RenderService`], the same path the REST API uses, so the
 //! two surfaces cannot disagree about what is valid or what gets stored.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use base64::Engine as _;
@@ -28,8 +29,8 @@ use crate::bundle::BundleFile;
 use crate::config::Config;
 use crate::error::ApiError;
 use crate::principal::TenantId;
-use crate::render::{RenderRequest, RenderService};
-use crate::store::Kind;
+use crate::render::{InputFile, RenderRequest, RenderService};
+use crate::store::{AssetRole, Entry, Kind};
 use crate::templates::TemplateKind;
 
 /// The protocol revision this server speaks.
@@ -60,6 +61,12 @@ pub struct RenderArgs {
     /// The template's own helpers and brand colours are in scope.
     #[serde(default)]
     pub body: Option<String>,
+    /// `sys.inputs` values available to the template. Strings only, per Typst.
+    #[serde(default)]
+    pub inputs: BTreeMap<String, String>,
+    /// Replacements for existing text files in the template.
+    #[serde(default)]
+    pub overrides: Vec<TemplateTextFile>,
     /// Ids of previously uploaded assets to make available to the document.
     #[serde(default)]
     pub assets: Vec<String>,
@@ -70,8 +77,21 @@ pub struct RenderArgs {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct CompileArgs {
-    /// A complete Typst document.
-    pub source: String,
+    /// A complete Typst document, shorthand for one `main.typ` file.
+    #[serde(default)]
+    pub source: Option<String>,
+    /// A multi-file text bundle. Binary data comes from uploaded assets.
+    #[serde(default)]
+    pub files: Vec<TemplateTextFile>,
+    /// Entrypoint within `files`. Defaults to `main.typ`.
+    #[serde(default)]
+    pub main: Option<String>,
+    /// Structured data mounted as `data.json`.
+    #[serde(default)]
+    pub data: Option<serde_json::Value>,
+    /// `sys.inputs` values. Strings only, per Typst.
+    #[serde(default)]
+    pub inputs: BTreeMap<String, String>,
     /// Ids of previously uploaded assets to make available to the document.
     #[serde(default)]
     pub assets: Vec<String>,
@@ -117,6 +137,16 @@ pub struct FontArgs {
     /// Case-insensitive substring to filter family names by.
     #[serde(default)]
     pub query: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
+pub struct AssetArgs {
+    /// Optional role filter: `image`, `font`, or `data`.
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// Maximum number returned. Defaults to 100 and is capped at 1000.
+    #[serde(default)]
+    pub limit: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -185,6 +215,15 @@ impl TypstMcp {
             data: args.data,
             body: args.body,
             assets: args.assets,
+            inputs: args.inputs,
+            overrides: args
+                .overrides
+                .into_iter()
+                .map(|file| InputFile {
+                    path: file.path,
+                    text: file.text,
+                })
+                .collect(),
             preview_pages: clamp_pages(args.preview_pages),
             ..Default::default()
         };
@@ -201,7 +240,18 @@ impl TypstMcp {
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         let request = RenderRequest {
-            source: Some(args.source),
+            source: args.source,
+            files: args
+                .files
+                .into_iter()
+                .map(|file| InputFile {
+                    path: file.path,
+                    text: file.text,
+                })
+                .collect(),
+            main: args.main,
+            data: args.data,
+            inputs: args.inputs,
             assets: args.assets,
             preview_pages: clamp_pages(args.preview_pages),
             ..Default::default()
@@ -341,10 +391,42 @@ impl TypstMcp {
     )]
     async fn typst_assets(
         &self,
+        Parameters(args): Parameters<AssetArgs>,
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
-        let assets = self.render.store().list(&self.tenant(&ctx)?, Kind::Asset);
-        json_result(serde_json::json!({ "assets": assets }))
+        let filter = match args.kind.as_deref() {
+            Some("image") => Some(AssetRole::Image),
+            Some("font") => Some(AssetRole::Font),
+            Some("data") => Some(AssetRole::Data),
+            Some(_) => {
+                return ApiError::bad_request("kind must be `image`, `font`, or `data`")
+                    .into_mcp_result();
+            }
+            None => None,
+        };
+        let limit = args.limit.unwrap_or(100).min(1000);
+        let mut assets: Vec<_> = self
+            .render
+            .store()
+            .list(&self.tenant(&ctx)?, Kind::Asset)
+            .into_iter()
+            .filter(|entry| filter.is_none_or(|role| asset_role(entry) == role))
+            .map(|entry| {
+                let role = asset_role(&entry).as_str();
+                serde_json::json!({
+                    "id": entry.id,
+                    "filename": entry.filename,
+                    "content_type": entry.content_type,
+                    "bytes": entry.bytes,
+                    "kind": role,
+                    "created_at": entry.created_at,
+                    "expires_at": entry.expires_at,
+                })
+            })
+            .collect();
+        let total = assets.len();
+        assets.truncate(limit);
+        json_result(serde_json::json!({ "total": total, "assets": assets }))
     }
 
     #[tool(
@@ -428,6 +510,27 @@ fn kind_name(kind: TemplateKind) -> &'static str {
         TemplateKind::Wrapper => "wrapper",
         TemplateKind::Data => "data",
     }
+}
+
+fn asset_role(entry: &Entry) -> AssetRole {
+    entry.asset_role.unwrap_or_else(|| {
+        let path = entry.filename.as_deref().unwrap_or_default();
+        let extension = path.rsplit('.').next().unwrap_or_default();
+        if matches!(
+            extension.to_ascii_lowercase().as_str(),
+            "ttf" | "otf" | "ttc"
+        ) {
+            AssetRole::Font
+        } else if entry
+            .content_type
+            .as_deref()
+            .is_some_and(|content_type| content_type.starts_with("image/"))
+        {
+            AssetRole::Image
+        } else {
+            AssetRole::Data
+        }
+    })
 }
 
 /// Bound how many pages a caller can ask to see at once.

@@ -231,6 +231,12 @@ impl Bundle {
         self.files
     }
 
+    /// Attach validated string inputs for `sys.inputs`.
+    pub fn with_inputs(mut self, inputs: BTreeMap<String, String>) -> Self {
+        self.inputs = inputs;
+        self
+    }
+
     pub fn inputs(&self) -> &BTreeMap<String, String> {
         &self.inputs
     }

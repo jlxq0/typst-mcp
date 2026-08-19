@@ -14,8 +14,9 @@ Hanso template and seven MCP tools. Current `main` exposes the full eight-tool s
 including text-only `typst_upload_template`, and adds tenant-scoped ephemeral template
 resolution plus safe REST tar/gzip upload and deletion. It has also replaced bulk worker
 frames with parent-staged path-only I/O, made direct-PDF responses no-store, unified error
-mapping, and added tenant-bound OIDC downloads. Uploaded-font isolation, metrics/OTLP, the
-KSC/Lenno/Freudenberg templates, and image smoke/soak gates remain implementation work;
+mapping, added tenant-bound OIDC downloads, completed the MCP argument/filter surface, and
+isolated uploaded fonts to one job. Metrics/OTLP, the KSC/Lenno/Freudenberg templates, and
+image smoke/soak gates remain implementation work;
 deployed `v0.1.8` predates all current-main checkpoints. See `Plan.md` for the checklist.
 
 ## Shape (RFC 9728 / MCP authorization)
