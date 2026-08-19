@@ -31,6 +31,16 @@ Templates and fonts are **baked** into the image when they are ours and reused (
 reviewed, permanent) and **uploaded** when they are one-off (a client's letterhead, a brand
 typeface, a template Claude just drafted). Uploads are TTL'd and per-caller.
 
+### Current implementation checkpoint (2026-08-19)
+
+The deployed `v0.1.8` proves the core compile sandbox, Entra authentication, the
+same-origin DCR/OAuth bridge, tenant-scoped assets/outputs, signed links, Hanso rendering,
+and **seven** MCP tools. The eighth tool, `typst_upload_template`, is part of the target
+below but is not implemented yet. Ephemeral templates, REST template upload/delete,
+per-job uploaded fonts, bearer-authenticated downloads, path-only worker inputs, true
+no-store `output=pdf`, unified HTTP/MCP errors, observability, the remaining three brands,
+and release smoke/soak gates are likewise completion work, not claims about `v0.1.8`.
+
 ## 2. Why in-process Typst rather than shelling out
 
 `typst::World` **is** the sandbox. Implement `source()` and `file()` over an in-memory
@@ -50,10 +60,10 @@ input, which turns the strongest regression test in the suite into one line.
 | G2 | "Use the Hanso template" produces a PDF the owner would send to a client | manual — the only test that matters |
 | G3 | Claude sees the preview, spots a layout problem, fixes it, re-renders | `tests/mcp_roundtrip.rs` asserts the image block |
 | G4 | Claude drafts a new template, uses it, and it can be promoted to git unchanged | `tests/templates.rs::upload_then_render_ephemeral` |
-| G5 | `#while true {}` is killed at the deadline and the server stays healthy | `tests/sandbox.rs::infinite_loop_is_killed` |
+| G5 | A heavy finite Typst program is killed at the deadline and the server stays healthy | `tests/sandbox.rs::a_runaway_compile_is_killed_and_the_service_survives` |
 | G6 | `#read("/etc/passwd")` returns "file not found", never content | `tests/sandbox.rs::no_filesystem_escape` |
 | G7 | One caller cannot see another's uploads or outputs, by id or URL | `tests/tenancy.rs` |
-| G8 | Disk cannot grow without bound under any caller behaviour | `tests/store.rs` + volume `sizeLimit` |
+| G8 | Disk cannot grow without bound under any caller behaviour | `tests/store.rs` + the PVC's capacity |
 | G9 | 10 000 sequential compiles leave the process healthy and flat on memory | `scripts/soak.sh` — see §5 |
 | G10 | A Phoenix app renders a PDF over `/api/v1` without touching the edge | smoke step against the cluster Service |
 | G11 | `fmt`, `clippy -D warnings`, `test`, `audit`, `deny` all clean; no image ships un-smoked | Forgejo CI |
@@ -66,8 +76,9 @@ input, which turns the strongest regression test in the suite into one line.
   downloader exists in the binary.
 - **Beta environment.** Test locally, deploy live — same as `matrix-mcp` and `jmap-mcp`.
 - **Rate limiting, object storage, multi-replica, server-side URL fetching.**
-- **Output durability.** Outputs live 2 h on a local volume and a deploy wipes them.
-  Accepted: they are re-renderable.
+- **Output durability.** Outputs live 2 h on a single-replica ReadWriteOnce PVC. They
+  survive a pod restart or Recreate rollout, but have no durability SLA and remain
+  re-renderable cache entries rather than records of truth.
 
 ## 5. The two findings that shaped the design
 
@@ -96,27 +107,32 @@ Current MCP spec is **2026-07-28** (sessions and the `initialize` handshake remo
 (upstream PR #1105 open). We pin `rmcp` 3.1.2 and set the protocol version explicitly, then
 drop the override when upstream catches up.
 
-DCR being deprecated in favour of pre-registration is what makes Entra straightforward:
-register one app, validate JWTs, serve RFC 9728 protected-resource metadata. No `/register`
-shim, no OAuth proxy — unlike `jmap-mcp`, which needed both against Logto under the old
-rules.
+The protocol prefers pre-registration over DCR, but the clients verified for this service
+still require dynamic registration and same-origin authorization endpoints. The proven
+deployment therefore fronts Entra with a narrow bridge: RFC 9728 protected-resource
+metadata points at this origin, RFC 8414 metadata advertises `/register`, `/authorize`, and
+`/token`, `/register` returns one pre-provisioned Entra public client, and the OAuth proxy
+uses `{origin}/oauth/callback` upstream. Redirect URIs are exact-string allowlisted. The
+access token presented to `/mcp` remains an Entra JWT and is validated locally.
 
 **The identity provider here is the Hanso Group Entra tenant, and only that.** Logto at
 `login.kampong.social` is the IdP for the JMAP and Matrix servers; it is never this
 server's issuer, and the two must not be mixed in config, docs or 1Password items.
 
-## 7. Shape
+## 7. Target shape
 
 ```
                     ┌────────────────────────────────────────────┐
   Claude Desktop ──▶│ :3000  axum                                │
    (Entra OAuth)    │   /mcp                 rmcp, 2026-07-28    │
+                    │   /register, /authorize, /token            │
+                    │   /oauth/callback      DCR/OAuth → Entra  │
                     │   /api/v1/*            static API key      │
   Phoenix apps ────▶│   /files/*             bearer | signature  │
    (in-cluster)     │   /.well-known/oauth-protected-resource/mcp│
                     │                                            │
                     │  Principal ─▶ tenant = HMAC(salt, sub|key) │
-                    │  /data/t_<tenant>/{assets,tpl,out}         │
+                    │  /data/t_<tenant>/{assets,tpl,out} on PVC  │
                     └──────────────────┬─────────────────────────┘
                                        │ one job, paths not bytes
                     ┌──────────────────▼─────────────────────────┐

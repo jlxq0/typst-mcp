@@ -7,6 +7,15 @@ across documents.
 
 Self-host the `/mcp` endpoint on your own domain.
 
+## Status
+
+Production currently runs `v0.1.8` at `https://typst-mcp.hanso.group`. It ships one
+Hanso template and seven MCP tools. The intended eight-tool surface adds
+`typst_upload_template`; ephemeral templates, template POST/DELETE, uploaded-font
+isolation, bearer downloads, path-only worker jobs, no-store PDF responses, metrics/OTLP,
+the KSC/Lenno/Freudenberg templates, and image smoke/soak gates remain implementation
+work. See `Plan.md` for the ordered completion checklist.
+
 ## Shape (RFC 9728 / MCP authorization)
 
 Matches [matrix-mcp](https://github.com/jlxq0/matrix-mcp), not the older
@@ -51,6 +60,7 @@ cleartext `http` only on a loopback host (RFC 8252 §7.3). There is no
 | `typst_fonts` | Fonts available to compiles |
 | `typst_assets` | List uploaded assets for the caller |
 | `typst_link` | Mint a short-lived signed download URL |
+| `typst_upload_template` | **Target:** create a tenant-scoped text-only template; not in `v0.1.8` |
 
 REST (`/api/v1`) is the same surface behind static API keys, for services that
 should not put a long-lived secret in a desktop MCP client.
@@ -114,10 +124,11 @@ invent tenant or client GUIDs — copy them from the portal after the app exists
    - `TYPST_MCP_OIDC_ISSUER=https://login.microsoftonline.com/<tenant-id>/v2.0`
    - optionally `TYPST_MCP_OIDC_TENANT_ID=<tenant-id>` so a token from another
      directory cannot authenticate here.
-8. MCP *clients* (Claude, Cursor, …) need their own Entra registration — or to
-   be authorized on this API — with **their** redirect URIs
-   (`https://claude.ai/api/mcp/auth_callback`, etc.). Do not invent those client
-   IDs; add them when the first client is wired.
+8. Create a second public PKCE client, pre-authorise it for the API scope, and register
+   only `https://typst-mcp.hanso.group/oauth/callback` with Entra.
+9. Set that public client's id as `TYPST_MCP_DCR_CLIENT_ID` and configure the exact client
+   callbacks accepted by the bridge in `TYPST_MCP_OAUTH_REDIRECT_URIS`. Claude/Cursor/Grok
+   callbacks terminate at typst-mcp and are never added to Entra directly.
 
 Store issuer, audience, tenant salt, and signing secret in your secret manager.
 The image pull secret is whatever your registry requires.
@@ -148,21 +159,26 @@ OIDC is optional locally. Production typically uses Entra only for `/mcp`.
 
 ## Image / CI
 
-Forgejo CI (`.forgejo/workflows/ci.yml`) matches matrix-mcp: fmt, clippy, test,
-audit, deny, then `buildctl` against Pada's buildkitd. `v*` tags push
-
-`your-registry.example/typst-mcp:<tag>` (and GHCR).
+Forgejo CI (`.forgejo/workflows/ci.yml`) runs fmt, clippy, test, audit and deny. On a `v*`
+tag it then builds and pushes `forge.oddie.app/jlxq0/typst-mcp:<tag>` with BuildKit.
+Building the image locally and running the complete smoke suite before push is still a
+required gate; current CI does not yet provide that guarantee.
 
 ```sh
 docker run --rm -p 3000:3000 \
-  -e TYPST_MCP_PUBLIC_URL=https://typst-mcp.your-domain.example \
+  -e TYPST_MCP_PUBLIC_URL=https://typst-mcp.hanso.group \
   -e TYPST_MCP_TENANT_SALT=... \
   -e TYPST_MCP_SIGNING_SECRET=... \
   -e TYPST_MCP_OIDC_ISSUER=https://login.microsoftonline.com/<tenant-id>/v2.0 \
-  -e TYPST_MCP_OIDC_AUDIENCE=api://typst-mcp \
+  -e TYPST_MCP_OIDC_AUDIENCE=api://typst-mcp,<api-app-guid> \
   -v typst-data:/data \
-  your-registry.example/typst-mcp:v0.1.0
+  forge.oddie.app/jlxq0/typst-mcp:v0.1.8
 ```
+
+The live service is a single replica with a 5 GiB ReadWriteOnce PVC and Recreate rollout
+strategy. TTL and per-tenant/global LRU quotas govern content; the PVC survives ordinary
+pod replacements, but rendered output remains a re-creatable cache rather than durable
+business data. Deployment secrets come from `typst-mcp-www` in the `Oddie Apps` vault.
 
 ## Licence
 

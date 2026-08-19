@@ -4,6 +4,26 @@ Renders branded PDFs with Typst, over MCP (`/mcp`) and a REST API (`/api/v1`). R
 axum + rmcp. Typst is linked in-process; every compile runs in a one-shot subprocess.
 Specs in `.spec/`, ordered tasks in `Plan.md`, success criteria in `GOAL.md`.
 
+## Current versus target (2026-08-19)
+
+- Current production is `v0.1.8` at `https://typst-mcp.hanso.group`: the compile sandbox,
+  Entra validation, same-origin DCR/OAuth bridge, tenant store, signed links, Hanso template,
+  asset upload and seven MCP tools are real. `typst_upload_template` is the target eighth
+  tool, not an existing route hidden in the docs.
+- Do not describe path-only worker frames, true no-store `output=pdf`, OIDC bearer
+  downloads, ephemeral template upload/delete, per-job uploaded fonts, unified HTTP/MCP
+  errors, metrics/OTLP/audit, or smoke/soak CI as current. Those are Plan completion gaps.
+- The live store is a 5 GiB ReadWriteOnce PVC on one replica with `Recreate` rollout. It
+  survives pod replacement; TTL and LRU quotas govern content, and PVC capacity is the
+  final disk bound. It is still a re-creatable cache, not durable business storage.
+- OfficeMaster currently has the canonical Hanso library at `typst/hanso.typ` and a pushed
+  KSC implementation at `brands/ksc/typst/ksc.typ` on `feat/ksc-typst-template`. Lenno and
+  Freudenberg have briefs/masters but no completed Typst library. Preserve the unrelated
+  dirty Freudenberg worktree; never fold it into a template sync accidentally.
+- `scripts/sync-templates.sh` currently vendors Hanso only. Adding KSC and moving Hanso to
+  its final brand-local home are target work; `templates/UPSTREAM` records the source
+  commit, and CI drift checking is not complete yet.
+
 ## Known Pitfalls
 
 - **Validate an entire asset list before reading any asset bytes.** The render path used
@@ -184,7 +204,9 @@ cargo fmt --all --check \
   is no vault named "Hanso". Registry creds are shared from the `matrix-mcp-www` item.
   The app's own item is **`typst-mcp-www` in `Oddie Apps`**, not Gruyere — the comment in
   `platform/clusters/fondue/typst-mcp/external-secret.yaml` still says Gruyere and is
-  wrong. It holds `TENANT_SALT`, `SIGNING_SECRET`, `OIDC_ISSUER`, `OIDC_AUDIENCE` only.
+  wrong. It currently maps only `TENANT_SALT`, `SIGNING_SECRET`, and `OIDC_ISSUER`.
+  `OIDC_AUDIENCE`, `OIDC_TENANT_ID`, `DCR_CLIENT_ID`, and the redirect allowlist are
+  reviewed public deployment values; mapping `API_KEYS` remains release work.
 
 ## Verified environment facts (2026-08-17)
 
