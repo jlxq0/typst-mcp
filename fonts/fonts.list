@@ -1,0 +1,18 @@
+# Required by the four brand templates.
+ofl/figtree
+ofl/inter
+ofl/passionone
+ofl/spacegrotesk
+ofl/roboto
+ofl/sourcesans3
+apache/robotoslab
+
+# General documentation, code and fallback families.
+ofl/ibmplexsans
+ofl/ibmplexserif
+ofl/ibmplexmono
+ofl/jetbrainsmono
+ofl/sourceserif4
+ofl/ebgaramond
+ofl/notosans
+ofl/notoserif

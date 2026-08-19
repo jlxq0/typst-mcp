@@ -37,6 +37,8 @@ jobs:
         env:
           OFFICEMASTER_DIR: ${{ github.workspace }}/.upstream/OfficeMaster
         run: scripts/sync-templates.sh --check
+      - name: Verify bundled font checksums and licences
+        run: scripts/fetch-fonts.sh --verify-only
       # Pin a commit on master, not on `stable`. Forge resolves actions from its
       # own mirrors (DEFAULT_ACTIONS_URL = forge.oddie.app), and dtolnay
       # force-pushes `stable`, so the mirror's 24h sync prunes the old tip and

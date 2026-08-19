@@ -59,7 +59,23 @@ fn the_brand_font_is_available() {
             .take(20)
             .collect::<Vec<_>>()
     );
-    for family in ["Inter", "Passion One", "Roboto", "Space Grotesk"] {
+    for family in [
+        "Figtree",
+        "Inter",
+        "Passion One",
+        "Space Grotesk",
+        "Roboto",
+        "Source Sans 3",
+        "Roboto Slab",
+        "IBM Plex Sans",
+        "IBM Plex Serif",
+        "IBM Plex Mono",
+        "JetBrains Mono",
+        "Source Serif 4",
+        "EB Garamond",
+        "Noto Sans",
+        "Noto Serif",
+    ] {
         assert!(
             fonts.has_family(family),
             "{family} is not in the baked font set; a branded document would fall back"

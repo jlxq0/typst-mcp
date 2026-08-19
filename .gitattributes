@@ -1,0 +1,3 @@
+# Locked upstream font and licence bytes must survive checkout unchanged. Their SHA-256
+# values are the review surface; normalising line endings would invalidate the lock.
+fonts/google/** -diff -text

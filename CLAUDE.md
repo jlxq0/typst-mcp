@@ -17,6 +17,8 @@ Specs in `.spec/`, ordered tasks in `Plan.md`, success criteria in `GOAL.md`.
   template upload/deletion. Full compile/render arguments, asset roles/filters, and
   RAII-workspace-scoped uploaded fonts are also implemented. KSC and Lenno are vendored
   from canonical OfficeMaster commits with schemas, safe fixtures and licensed brand fonts.
+  Fifteen reviewed Google Fonts families are pinned with per-file checksums and licence
+  texts; CI verifies the committed set offline.
   Metrics/OTLP/audit and smoke/soak CI remain Plan completion gaps.
 - The live store is a 5 GiB ReadWriteOnce PVC on one replica with `Recreate` rollout. It
   survives pod replacement; TTL and LRU quotas govern content, and PVC capacity is the
