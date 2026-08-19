@@ -80,7 +80,11 @@ impl CompileService {
     }
 
     /// Compile one job in a fresh process.
-    pub async fn compile(&self, job: &Job) -> Result<JobResult, SpawnError> {
+    pub async fn compile<J>(&self, job: &J) -> Result<JobResult, SpawnError>
+    where
+        J: AsRef<Job> + ?Sized,
+    {
+        let job = job.as_ref();
         let _permit = self.acquire().await?;
 
         let mut command = worker_command(&self.config.exe);

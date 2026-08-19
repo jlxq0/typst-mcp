@@ -4,15 +4,11 @@
 //! sides are this binary, so the format only has to survive a process boundary, not
 //! a version skew.
 
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
 
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD as BASE64;
-use serde::{Deserialize, Serialize};
-
-use crate::bundle::FileContent;
 use crate::diagnostics::Diagnostic;
 
 /// Refuse to even allocate for a frame larger than this.
@@ -21,48 +17,20 @@ use crate::diagnostics::Diagnostic;
 /// network header is; without a ceiling, a bad `u32` is a 4 GiB allocation.
 pub const MAX_FRAME_BYTES: u32 = 64 * 1024 * 1024;
 
-/// One file on its way to a worker.
-///
-/// `Path` exists so bulk bytes can stay out of the pipe once the content store lands:
-/// the parent validates a path, the worker opens only paths from the job it was given.
-/// Until then everything travels inline.
+/// How the worker reconstructs a staged bundle file.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "lowercase")]
-pub enum JobContent {
-    Text { text: String },
-    Base64 { data: String },
-    Path { path: PathBuf },
+#[serde(rename_all = "lowercase")]
+pub enum JobFileKind {
+    Text,
+    Binary,
 }
 
-impl JobContent {
-    pub fn from_content(content: &FileContent) -> Self {
-        match content {
-            FileContent::Text(text) => Self::Text { text: text.clone() },
-            FileContent::Binary(bytes) => Self::Base64 {
-                data: BASE64.encode(bytes),
-            },
-        }
-    }
-
-    /// Materialise the content, reading from disk only for `Path` entries.
-    pub fn resolve(&self) -> io::Result<FileContent> {
-        match self {
-            Self::Text { text } => Ok(FileContent::Text(text.clone())),
-            Self::Base64 { data } => BASE64
-                .decode(data)
-                .map(FileContent::Binary)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e)),
-            Self::Path { path } => std::fs::read(path).map(FileContent::Binary),
-        }
-    }
-}
-
-/// One file of a job.
+/// One validated virtual file and its parent-created staging path.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct JobFile {
     pub path: String,
-    #[serde(flatten)]
-    pub content: JobContent,
+    pub source: PathBuf,
+    pub kind: JobFileKind,
 }
 
 /// Everything a worker needs to produce one document.
@@ -74,7 +42,15 @@ pub struct Job {
     pub inputs: BTreeMap<String, String>,
     #[serde(default)]
     pub font_dirs: Vec<PathBuf>,
+    /// Parent-created directory in which the worker writes fixed output names.
+    pub output_dir: PathBuf,
     pub limits: JobLimits,
+}
+
+impl AsRef<Job> for Job {
+    fn as_ref(&self) -> &Job {
+        self
+    }
 }
 
 /// Bounds the worker enforces on itself.
@@ -104,13 +80,12 @@ impl Default for JobLimits {
     }
 }
 
-/// A rendered page as it crosses the pipe.
+/// A rendered page's metadata. The PNG itself stays in the job workspace.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct JobPreview {
     pub page: usize,
     pub width: u32,
     pub height: u32,
-    pub png_base64: String,
 }
 
 /// What a worker sends back. Failure is a value, not an exit code, so the parent can
@@ -119,7 +94,6 @@ pub struct JobPreview {
 #[serde(tag = "status", rename_all = "lowercase")]
 pub enum JobResult {
     Ok {
-        pdf_base64: String,
         pages: usize,
         previews: Vec<JobPreview>,
         diagnostics: Vec<Diagnostic>,
@@ -128,6 +102,9 @@ pub enum JobResult {
         message: String,
         diagnostics: Vec<Diagnostic>,
     },
+    /// Staging or output I/O failed. Details stay on worker stderr and never become a
+    /// caller-visible document error.
+    Internal,
 }
 
 /// Write a length-prefixed JSON frame.
@@ -180,17 +157,18 @@ mod tests {
             files: vec![
                 JobFile {
                     path: "main.typ".into(),
-                    content: JobContent::Text {
-                        text: "= Hi".into(),
-                    },
+                    source: "/tmp/job/input/0".into(),
+                    kind: JobFileKind::Text,
                 },
                 JobFile {
                     path: "logo.png".into(),
-                    content: JobContent::from_content(&FileContent::Binary(vec![1, 2, 3])),
+                    source: "/tmp/job/input/1".into(),
+                    kind: JobFileKind::Binary,
                 },
             ],
             inputs: BTreeMap::from([("locale".into(), "de".into())]),
             font_dirs: vec![],
+            output_dir: "/tmp/job/output".into(),
             limits: JobLimits::default(),
         }
     }
@@ -205,10 +183,32 @@ mod tests {
     }
 
     #[test]
-    fn binary_content_survives_the_pipe() {
-        let content = FileContent::Binary(vec![0x89, b'P', b'N', b'G', 0, 255]);
-        let encoded = JobContent::from_content(&content);
-        assert_eq!(encoded.resolve().expect("decode"), content);
+    fn frames_contain_paths_and_metadata_not_bulk_bytes() {
+        let mut buf = Vec::new();
+        write_frame(&mut buf, &sample_job()).expect("write");
+        let frame = String::from_utf8(buf[4..].to_vec()).expect("json");
+        assert!(frame.contains("/tmp/job/input/1"));
+        assert!(!frame.contains("base64"));
+        assert!(!frame.contains("= Hi"));
+    }
+
+    #[test]
+    fn result_frames_contain_metadata_not_rendered_bytes() {
+        let result = JobResult::Ok {
+            pages: 1,
+            previews: vec![JobPreview {
+                page: 1,
+                width: 800,
+                height: 600,
+            }],
+            diagnostics: vec![],
+        };
+        let mut buf = Vec::new();
+        write_frame(&mut buf, &result).expect("write");
+        let frame = String::from_utf8(buf[4..].to_vec()).expect("json");
+        assert!(!frame.contains("%PDF-"));
+        assert!(!frame.contains("png_base64"));
+        assert!(!frame.contains("pdf_base64"));
     }
 
     #[test]
@@ -233,10 +233,8 @@ mod tests {
     fn oversized_frames_are_refused_on_write_too() {
         // The limit has to be symmetric, or the worker spends a whole compile producing
         // a frame the parent will then reject.
-        let huge = JobResult::Ok {
-            pdf_base64: "A".repeat(MAX_FRAME_BYTES as usize + 1),
-            pages: 1,
-            previews: vec![],
+        let huge = JobResult::Failed {
+            message: "A".repeat(MAX_FRAME_BYTES as usize + 1),
             diagnostics: vec![],
         };
         let err = write_frame(Vec::new(), &huge).expect_err("must refuse");

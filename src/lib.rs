@@ -16,6 +16,7 @@ pub mod compile;
 pub mod config;
 pub mod diagnostics;
 pub mod fonts;
+pub mod job_io;
 pub mod mcp;
 pub mod oauth_metadata;
 pub mod oauth_proxy;

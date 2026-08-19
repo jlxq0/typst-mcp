@@ -15,13 +15,11 @@ use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
 use std::sync::Arc;
 
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD as BASE64;
-
-use crate::bundle::{Bundle, BundleFile};
+use crate::bundle::{Bundle, BundleFile, FileContent};
 use crate::compile::{CompileOptions, compile};
 use crate::fonts::FontLibrary;
-use crate::protocol::{Job, JobPreview, JobResult, read_frame, write_frame};
+use crate::job_io::{PDF_NAME, preview_filename};
+use crate::protocol::{Job, JobFileKind, JobPreview, JobResult, read_frame, write_frame};
 
 /// Read one job, compile it, write one result. Returns the process exit code.
 ///
@@ -52,16 +50,25 @@ pub fn run() -> i32 {
 fn execute(job: &Job) -> JobResult {
     let mut files = Vec::with_capacity(job.files.len());
     for file in &job.files {
-        match file.content.resolve() {
-            Ok(content) => files.push(BundleFile {
-                path: file.path.clone(),
-                content,
-            }),
-            Err(err) => {
-                return JobResult::Failed {
-                    message: format!("could not read {}: {err}", file.path),
-                    diagnostics: vec![],
+        match std::fs::read(&file.source) {
+            Ok(bytes) => {
+                let content = match file.kind {
+                    JobFileKind::Text => match String::from_utf8(bytes) {
+                        Ok(text) => FileContent::Text(text),
+                        Err(err) => return internal(format!("staged text was not UTF-8: {err}")),
+                    },
+                    JobFileKind::Binary => FileContent::Binary(bytes),
                 };
+                files.push(BundleFile {
+                    path: file.path.clone(),
+                    content,
+                });
+            }
+            Err(err) => {
+                return internal(format!(
+                    "could not read staged input {}: {err}",
+                    file.source.display()
+                ));
             }
         }
     }
@@ -70,10 +77,7 @@ fn execute(job: &Job) -> JobResult {
     let bundle = match Bundle::new(&job.main, files, inputs, job.limits.max_bundle_bytes) {
         Ok(bundle) => bundle,
         Err(err) => {
-            return JobResult::Failed {
-                message: err.to_string(),
-                diagnostics: vec![],
-            };
+            return internal(format!("parent supplied an invalid staged bundle: {err}"));
         }
     };
 
@@ -87,26 +91,40 @@ fn execute(job: &Job) -> JobResult {
     };
 
     match compile(&bundle, fonts, &options) {
-        Ok(out) => JobResult::Ok {
-            pdf_base64: BASE64.encode(&out.pdf),
-            pages: out.pages,
-            previews: out
-                .previews
-                .into_iter()
-                .map(|p| JobPreview {
-                    page: p.page,
-                    width: p.width,
-                    height: p.height,
-                    png_base64: BASE64.encode(&p.png),
-                })
-                .collect(),
-            diagnostics: out.diagnostics,
-        },
+        Ok(out) => {
+            if let Err(err) = std::fs::write(job.output_dir.join(PDF_NAME), &out.pdf) {
+                return internal(format!("could not write staged PDF: {err}"));
+            }
+            let mut previews = Vec::with_capacity(out.previews.len());
+            for preview in out.previews {
+                if let Err(err) = std::fs::write(
+                    job.output_dir.join(preview_filename(preview.page)),
+                    &preview.png,
+                ) {
+                    return internal(format!("could not write staged preview: {err}"));
+                }
+                previews.push(JobPreview {
+                    page: preview.page,
+                    width: preview.width,
+                    height: preview.height,
+                });
+            }
+            JobResult::Ok {
+                pages: out.pages,
+                previews,
+                diagnostics: out.diagnostics,
+            }
+        }
         Err(err) => JobResult::Failed {
             message: err.to_string(),
             diagnostics: err.diagnostics(),
         },
     }
+}
+
+fn internal(message: String) -> JobResult {
+    eprintln!("worker: {message}");
+    JobResult::Internal
 }
 
 /// Cap the worker's address space.
@@ -130,4 +148,31 @@ pub fn send_job<W: Write>(out: W, job: &Job) -> io::Result<()> {
 /// Read a result frame from a stream.
 pub fn receive_result<R: Read>(input: R) -> io::Result<JobResult> {
     read_frame(input)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use super::*;
+    use crate::bundle::BundleFile;
+    use crate::job_io::PreparedJob;
+    use crate::protocol::JobLimits;
+
+    #[test]
+    fn a_missing_staged_file_is_an_internal_worker_failure() {
+        let root = tempfile::tempdir().expect("root");
+        let bundle = Bundle::new(
+            "main.typ",
+            vec![BundleFile::text("main.typ", "= Hello")],
+            BTreeMap::new(),
+            1024,
+        )
+        .expect("bundle");
+        let prepared =
+            PreparedJob::stage(root.path(), &bundle, vec![], JobLimits::default()).expect("stage");
+        std::fs::remove_file(&prepared.job().files[0].source).expect("remove staged input");
+
+        assert_eq!(execute(prepared.job()), JobResult::Internal);
+    }
 }

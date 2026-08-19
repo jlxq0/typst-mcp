@@ -14,15 +14,16 @@ use thiserror::Error;
 use crate::bundle::{Bundle, BundleError, BundleFile, FileContent, MAX_FILES};
 use crate::config::Config;
 use crate::diagnostics::Diagnostic;
+use crate::job_io::{PDF_NAME, PreparedJob};
 use crate::principal::TenantId;
-use crate::protocol::{Job, JobContent, JobFile, JobLimits, JobResult};
+use crate::protocol::{JobLimits, JobResult};
 use crate::signing::Signer;
 use crate::spawn::{CompileService, SpawnError};
 use crate::store::{Kind, Meta, Store, StoreError};
 use crate::templates::{SourceMap, TemplateError, TemplateKind, TemplateSet};
 
 /// Filename of the rendered document within its store entry.
-pub const DOCUMENT_NAME: &str = "doc.pdf";
+pub const DOCUMENT_NAME: &str = PDF_NAME;
 
 /// What to render.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -114,6 +115,8 @@ pub enum RenderError {
     },
     #[error(transparent)]
     Spawn(#[from] SpawnError),
+    #[error("compile workspace I/O failed")]
+    Workspace(#[source] std::io::Error),
     #[error("the compile worker returned something unreadable: {0}")]
     Protocol(String),
 }
@@ -180,9 +183,15 @@ impl RenderService {
         request: &RenderRequest,
     ) -> Result<RenderResult, RenderError> {
         let (bundle, source_map) = self.assemble(tenant, request)?;
-        let job = self.job(bundle, request);
+        let prepared = PreparedJob::stage(
+            &self.config.data_dir.join("tmp"),
+            &bundle,
+            self.font_dirs.clone(),
+            self.job_limits(request),
+        )
+        .map_err(RenderError::Workspace)?;
 
-        let result = self.compiler.compile(&job).await?;
+        let result = self.compiler.compile(&prepared).await?;
         match result {
             JobResult::Failed {
                 message,
@@ -198,27 +207,30 @@ impl RenderService {
                 })
             }
             JobResult::Ok {
-                pdf_base64,
                 pages,
                 previews,
                 mut diagnostics,
             } => {
                 source_map.apply(&mut diagnostics);
-                let pdf = decode(&pdf_base64)?;
-                let previews = previews
+                let outputs = prepared
+                    .read_outputs(&previews)
+                    .map_err(RenderError::Workspace)?;
+                let previews = outputs
+                    .previews
                     .into_iter()
-                    .map(|p| {
-                        Ok(RenderedPreview {
-                            page: p.page,
-                            width: p.width,
-                            height: p.height,
-                            png: decode(&p.png_base64)?,
-                        })
+                    .map(|preview| RenderedPreview {
+                        page: preview.page,
+                        width: preview.width,
+                        height: preview.height,
+                        png: preview.png,
                     })
-                    .collect::<Result<Vec<_>, RenderError>>()?;
+                    .collect();
 
-                self.store_result(tenant, pdf, pages, previews, diagnostics)
+                self.store_result(tenant, outputs.pdf, pages, previews, diagnostics)
             }
+            JobResult::Internal => Err(RenderError::Protocol(
+                "compile worker could not process its staged files".into(),
+            )),
         }
     }
 
@@ -319,26 +331,14 @@ impl RenderService {
             .collect()
     }
 
-    fn job(&self, bundle: Bundle, request: &RenderRequest) -> Job {
-        Job {
-            main: bundle.main().to_owned(),
-            files: bundle
-                .files()
-                .map(|(path, content)| JobFile {
-                    path: path.to_owned(),
-                    content: JobContent::from_content(content),
-                })
-                .collect(),
-            inputs: bundle.inputs().clone(),
-            font_dirs: self.font_dirs.clone(),
-            limits: JobLimits {
-                max_bundle_bytes: self.config.max_bundle_bytes,
-                max_pages: self.config.max_pages,
-                preview_pages: request.preview_pages.clone().unwrap_or_else(|| vec![1]),
-                preview_scale_millis: 1000,
-                preview_max_px: self.config.preview_max_px,
-                memory_bytes: self.config.worker_memory_bytes,
-            },
+    fn job_limits(&self, request: &RenderRequest) -> JobLimits {
+        JobLimits {
+            max_bundle_bytes: self.config.max_bundle_bytes,
+            max_pages: self.config.max_pages,
+            preview_pages: request.preview_pages.clone().unwrap_or_else(|| vec![1]),
+            preview_scale_millis: 1000,
+            preview_max_px: self.config.preview_max_px,
+            memory_bytes: self.config.worker_memory_bytes,
         }
     }
 
@@ -406,13 +406,6 @@ impl RenderService {
 /// The filename a rasterised page is stored under.
 pub fn preview_name(page: usize) -> String {
     format!("page-{page}.png")
-}
-
-fn decode(value: &str) -> Result<Vec<u8>, RenderError> {
-    use base64::Engine as _;
-    base64::engine::general_purpose::STANDARD
-        .decode(value)
-        .map_err(|e| RenderError::Protocol(e.to_string()))
 }
 
 #[cfg(test)]

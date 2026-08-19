@@ -14,7 +14,9 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use tokio::sync::{Mutex, MutexGuard};
-use typst_mcp::protocol::{Job, JobContent, JobFile, JobLimits, JobResult};
+use typst_mcp::bundle::{Bundle, BundleFile};
+use typst_mcp::job_io::PreparedJob;
+use typst_mcp::protocol::{JobLimits, JobResult};
 use typst_mcp::spawn::{CompileService, SpawnConfig, SpawnError};
 
 /// Serialises the CPU- and memory-hungry tests.
@@ -31,22 +33,24 @@ async fn exclusive() -> MutexGuard<'static, ()> {
 }
 
 /// A single-source job with no preview, so tests measure compilation and nothing else.
-fn job(source: &str) -> Job {
-    Job {
-        main: "main.typ".into(),
-        files: vec![JobFile {
-            path: "main.typ".into(),
-            content: JobContent::Text {
-                text: source.into(),
-            },
-        }],
-        inputs: BTreeMap::new(),
-        font_dirs: vec![],
-        limits: JobLimits {
+fn job(source: &str) -> PreparedJob {
+    let bundle = Bundle::new(
+        "main.typ",
+        vec![BundleFile::text("main.typ", source)],
+        BTreeMap::new(),
+        8 * 1024 * 1024,
+    )
+    .expect("test bundle");
+    PreparedJob::stage(
+        &std::env::temp_dir().join("typst-mcp-tests"),
+        &bundle,
+        vec![],
+        JobLimits {
             preview_pages: vec![],
             ..Default::default()
         },
-    }
+    )
+    .expect("stage test job")
 }
 
 /// The real binary under test.
@@ -119,8 +123,10 @@ async fn a_runaway_compile_is_killed_and_the_service_survives() {
     let service = service(Duration::from_secs(3));
     let started = Instant::now();
 
+    let runaway = job(RUNAWAY);
+    let workspace = runaway.workspace_path().to_owned();
     let err = service
-        .compile(&job(RUNAWAY))
+        .compile(&runaway)
         .await
         .expect_err("a document past the deadline must not return a result");
 
@@ -128,6 +134,8 @@ async fn a_runaway_compile_is_killed_and_the_service_survives() {
         matches!(err, SpawnError::Timeout { .. }),
         "expected a timeout, got {err:?}"
     );
+    drop(runaway);
+    assert!(!workspace.exists(), "timed-out workspace must be removed");
     // Generous, but it must be bounded: the point is that the deadline is enforced by
     // killing a process, not by politely asking a thread to stop.
     assert!(
@@ -231,7 +239,7 @@ async fn memory_bombs_hit_the_worker_limit_not_the_host() {
     let _guard = exclusive().await;
     // A modest cap so the test is quick and cannot disturb the machine running it.
     let mut bomb = job("#let big = range(200000000).map(x => str(x))\n#big.len()");
-    bomb.limits.memory_bytes = 128 * 1024 * 1024;
+    bomb.limits_mut().memory_bytes = 128 * 1024 * 1024;
 
     let service = service(Duration::from_secs(20));
     match service.compile(&bomb).await {
@@ -249,7 +257,7 @@ async fn memory_bombs_hit_the_worker_limit_not_the_host() {
 async fn oversized_documents_are_refused_rather_than_rendered() {
     let _guard = exclusive().await;
     let mut long = job("#for _ in range(500) { pagebreak() }");
-    long.limits.max_pages = 10;
+    long.limits_mut().max_pages = 10;
 
     let service = service(Duration::from_secs(20));
     let result = service.compile(&long).await.expect("worker ran");
@@ -266,8 +274,8 @@ async fn preview_dimensions_are_clamped() {
     // A five-metre page at the default scale would be a pixmap of billions of pixels.
     // Without a clamp the allocator, not the caller, decides what happens next.
     let mut huge = job("#set page(width: 5000mm, height: 5000mm)\n= Big");
-    huge.limits.preview_pages = vec![1];
-    huge.limits.preview_max_px = 1000;
+    huge.limits_mut().preview_pages = vec![1];
+    huge.limits_mut().preview_max_px = 1000;
 
     let service = service(Duration::from_secs(20));
     let result = service.compile(&huge).await.expect("worker ran");

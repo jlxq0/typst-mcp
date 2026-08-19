@@ -370,7 +370,7 @@ fn error_code(err: &RenderError) -> &'static str {
         RenderError::Store(_) => "not_found",
         RenderError::Spawn(crate::spawn::SpawnError::Timeout { .. }) => "timeout",
         RenderError::Spawn(crate::spawn::SpawnError::Overloaded) => "overloaded",
-        RenderError::Spawn(_) | RenderError::Protocol(_) => "internal",
+        RenderError::Spawn(_) | RenderError::Workspace(_) | RenderError::Protocol(_) => "internal",
     }
 }
 

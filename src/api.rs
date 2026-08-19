@@ -263,7 +263,7 @@ fn render_error(err: RenderError) -> Response {
         RenderError::Spawn(crate::spawn::SpawnError::Overloaded) => {
             (StatusCode::SERVICE_UNAVAILABLE, "overloaded")
         }
-        RenderError::Spawn(_) | RenderError::Protocol(_) => {
+        RenderError::Spawn(_) | RenderError::Workspace(_) | RenderError::Protocol(_) => {
             (StatusCode::INTERNAL_SERVER_ERROR, "internal")
         }
     };

@@ -10,9 +10,10 @@ Specs in `.spec/`, ordered tasks in `Plan.md`, success criteria in `GOAL.md`.
   Entra validation, same-origin DCR/OAuth bridge, tenant store, signed links, Hanso template,
   asset upload and seven MCP tools are real. `typst_upload_template` is the target eighth
   tool, not an existing route hidden in the docs.
-- Do not describe path-only worker frames, true no-store `output=pdf`, OIDC bearer
-  downloads, ephemeral template upload/delete, per-job uploaded fonts, unified HTTP/MCP
-  errors, metrics/OTLP/audit, or smoke/soak CI as current. Those are Plan completion gaps.
+- Current `main` now has path-only worker control frames and parent-owned RAII job
+  workspaces; deployed `v0.1.8` predates that change. True no-store `output=pdf`, OIDC
+  bearer downloads, ephemeral template upload/delete, per-job uploaded fonts, unified
+  HTTP/MCP errors, metrics/OTLP/audit, and smoke/soak CI remain Plan completion gaps.
 - The live store is a 5 GiB ReadWriteOnce PVC on one replica with `Recreate` rollout. It
   survives pod replacement; TTL and LRU quotas govern content, and PVC capacity is the
   final disk bound. It is still a re-creatable cache, not durable business storage.
