@@ -12,10 +12,10 @@ Self-host the `/mcp` endpoint on your own domain.
 Production currently runs `v0.1.8` at `https://typst-mcp.hanso.group`. It ships one
 Hanso template and seven MCP tools. The intended eight-tool surface adds
 `typst_upload_template`; ephemeral templates, template POST/DELETE, uploaded-font
-isolation, bearer downloads, metrics/OTLP, the KSC/Lenno/Freudenberg templates, and image
-smoke/soak gates remain implementation work. Current `main` has already replaced bulk
-worker frames with parent-staged path-only I/O and made direct-PDF responses no-store;
-deployed `v0.1.8` predates those checkpoints. See `Plan.md` for the ordered checklist.
+isolation, metrics/OTLP, the KSC/Lenno/Freudenberg templates, and image smoke/soak gates
+remain implementation work. Current `main` has already replaced bulk worker frames with
+parent-staged path-only I/O, made direct-PDF responses no-store, and added tenant-bound OIDC
+downloads; deployed `v0.1.8` predates those checkpoints. See `Plan.md` for the checklist.
 
 ## Shape (RFC 9728 / MCP authorization)
 

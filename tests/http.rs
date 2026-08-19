@@ -351,7 +351,8 @@ async fn one_tenant_cannot_fetch_anothers_document() {
         .expect("fetch");
     assert_eq!(response.status(), 404, "bob read alice's document");
 
-    // Nor without any credential.
+    // With no proof at all, tell a legitimate client how to authenticate. This differs
+    // from Bob's valid wrong-tenant proof above, which must reveal nothing.
     assert_eq!(
         server
             .client
@@ -360,7 +361,7 @@ async fn one_tenant_cannot_fetch_anothers_document() {
             .await
             .expect("fetch")
             .status(),
-        404
+        401
     );
 }
 
@@ -412,6 +413,19 @@ async fn a_signed_link_works_without_any_header_and_expires() {
             .status(),
         200
     );
+
+    let signature = url
+        .split_once("sig=")
+        .map(|(_, signature)| signature)
+        .expect("signature");
+    let expired = format!(
+        "{}?exp=1&sig={signature}",
+        url.split_once('?').map(|(base, _)| base).expect("query")
+    );
+    let response = server.client.get(expired).send().await.expect("expired");
+    assert_eq!(response.status(), 410);
+    let body: serde_json::Value = response.json().await.expect("expired envelope");
+    assert_eq!(body["error"], "expired");
 }
 
 #[tokio::test]

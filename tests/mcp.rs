@@ -11,6 +11,8 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::Json;
@@ -62,6 +64,7 @@ struct Claims {
 /// A stand-in identity provider: discovery plus JWKS, nothing else.
 struct MockIdp {
     issuer: String,
+    offline: Arc<AtomicBool>,
 }
 
 impl MockIdp {
@@ -74,16 +77,30 @@ impl MockIdp {
 
         let discovery_issuer = issuer.clone();
         let jwks_issuer = issuer.clone();
+        let offline = Arc::new(AtomicBool::new(false));
+        let discovery_offline = Arc::clone(&offline);
+        let jwks_offline = Arc::clone(&offline);
         let app = axum::Router::new()
             .route(
                 "/.well-known/openid-configuration",
                 get(move || {
                     let issuer = discovery_issuer.clone();
+                    let offline = Arc::clone(&discovery_offline);
                     async move {
-                        Json(serde_json::json!({
-                            "issuer": issuer,
-                            "jwks_uri": format!("{issuer}/keys"),
-                        }))
+                        if offline.load(Ordering::SeqCst) {
+                            (
+                                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                                Json(serde_json::json!({ "error": "offline" })),
+                            )
+                        } else {
+                            (
+                                axum::http::StatusCode::OK,
+                                Json(serde_json::json!({
+                                    "issuer": issuer,
+                                    "jwks_uri": format!("{issuer}/keys"),
+                                })),
+                            )
+                        }
                     }
                 }),
             )
@@ -91,17 +108,28 @@ impl MockIdp {
                 "/keys",
                 get(move || {
                     let _ = &jwks_issuer;
+                    let offline = Arc::clone(&jwks_offline);
                     async move {
-                        Json(serde_json::json!({
-                            "keys": [{
-                                "kty": "RSA",
-                                "kid": KID,
-                                "use": "sig",
-                                "alg": "RS256",
-                                "n": JWK_N,
-                                "e": "AQAB",
-                            }],
-                        }))
+                        if offline.load(Ordering::SeqCst) {
+                            (
+                                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                                Json(serde_json::json!({ "error": "offline" })),
+                            )
+                        } else {
+                            (
+                                axum::http::StatusCode::OK,
+                                Json(serde_json::json!({
+                                    "keys": [{
+                                        "kty": "RSA",
+                                        "kid": KID,
+                                        "use": "sig",
+                                        "alg": "RS256",
+                                        "n": JWK_N,
+                                        "e": "AQAB",
+                                    }],
+                                })),
+                            )
+                        }
                     }
                 }),
             );
@@ -109,7 +137,7 @@ impl MockIdp {
         tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
         });
-        Self { issuer }
+        Self { issuer, offline }
     }
 
     /// Mint a token, overriding any claim a test wants to break.
@@ -134,6 +162,10 @@ impl MockIdp {
         header.kid = Some(KID.to_owned());
         let key = EncodingKey::from_rsa_pem(SIGNING_KEY.as_bytes()).expect("test key");
         jsonwebtoken::encode(&header, &claims, &key).expect("encode")
+    }
+
+    fn go_offline(&self) {
+        self.offline.store(true, Ordering::SeqCst);
     }
 }
 
@@ -327,6 +359,10 @@ fn images_in(result: &serde_json::Value) -> Vec<&serde_json::Value> {
 fn error_envelope_of(result: &serde_json::Value) -> serde_json::Value {
     assert_eq!(result["isError"], true, "{result}");
     serde_json::from_str(&text_of(result)).expect("tool error envelope")
+}
+
+fn json_content_of(result: &serde_json::Value) -> serde_json::Value {
+    serde_json::from_str(&text_of(result)).expect("JSON content block")
 }
 
 #[tokio::test]
@@ -557,6 +593,148 @@ async fn rendering_returns_a_link_and_an_image_the_model_can_see() {
     );
     assert_eq!(images[0]["mimeType"], "image/png");
     assert!(!images[0]["data"].as_str().expect("data").is_empty());
+}
+
+#[tokio::test]
+async fn an_oidc_bearer_fetches_only_its_own_pdf_and_preview() {
+    let server = TestServer::start().await;
+    let alice = server.idp.token("alice");
+    let bob = server.idp.token("bob");
+
+    let rendered = server
+        .call(
+            &alice,
+            "tools/call",
+            serde_json::json!({
+                "name": "typst_compile",
+                "arguments": { "source": "= Bearer download" },
+            }),
+        )
+        .await;
+    let payload = json_content_of(&rendered);
+    let pdf_url = payload["url"].as_str().expect("PDF URL");
+    let preview_url = pdf_url.replace("doc.pdf", "page-1.png");
+
+    for (url, content_type) in [
+        (pdf_url.to_owned(), "application/pdf"),
+        (preview_url, "image/png"),
+    ] {
+        let response = server
+            .client
+            .get(&url)
+            .bearer_auth(&alice)
+            .send()
+            .await
+            .expect("Alice download");
+        assert_eq!(response.status(), 200, "{url}");
+        assert_eq!(response.headers()["content-type"], content_type);
+
+        let denied = server
+            .client
+            .get(&url)
+            .bearer_auth(&bob)
+            .send()
+            .await
+            .expect("Bob download");
+        assert_eq!(denied.status(), 404, "wrong tenant must not reveal {url}");
+    }
+
+    let expired = server
+        .idp
+        .token_with("alice", |claims| claims.exp = now() - 3600);
+    assert_eq!(
+        server
+            .client
+            .get(pdf_url)
+            .bearer_auth(expired)
+            .send()
+            .await
+            .expect("expired token")
+            .status(),
+        404
+    );
+
+    let no_header = server
+        .client
+        .get(pdf_url)
+        .send()
+        .await
+        .expect("missing bearer");
+    assert_eq!(no_header.status(), 401);
+    assert!(
+        no_header
+            .headers()
+            .get("www-authenticate")
+            .is_some_and(|value| value
+                .to_str()
+                .is_ok_and(|v| v.contains("resource_metadata")))
+    );
+
+    let query_token = format!("{pdf_url}?token={alice}");
+    assert_ne!(
+        server
+            .client
+            .get(query_token)
+            .send()
+            .await
+            .expect("query token")
+            .status(),
+        200,
+        "credentials in query parameters must never authenticate"
+    );
+}
+
+#[tokio::test]
+async fn a_valid_signature_survives_an_oidc_provider_outage() {
+    let server = TestServer::start().await;
+    let rendered: serde_json::Value = server
+        .client
+        .post(format!("{}/api/v1/render", server.base))
+        .bearer_auth(API_KEY)
+        .json(&serde_json::json!({ "source": "= Signed fallback" }))
+        .send()
+        .await
+        .expect("render")
+        .json()
+        .await
+        .expect("render JSON");
+    let unsigned_url = rendered["url"].as_str().expect("URL");
+    let signed: serde_json::Value = server
+        .client
+        .post(format!("{}/api/v1/links", server.base))
+        .bearer_auth(API_KEY)
+        .json(&serde_json::json!({ "job_id": rendered["job_id"] }))
+        .send()
+        .await
+        .expect("link")
+        .json()
+        .await
+        .expect("link JSON");
+    let signed_url = signed["url"].as_str().expect("signed URL");
+    let token = server.idp.token("alice");
+
+    server.idp.go_offline();
+
+    let fallback = server
+        .client
+        .get(signed_url)
+        .bearer_auth(&token)
+        .send()
+        .await
+        .expect("signed fallback");
+    assert_eq!(fallback.status(), 200);
+    assert!(fallback.bytes().await.expect("PDF").starts_with(b"%PDF-"));
+
+    let unavailable = server
+        .client
+        .get(unsigned_url)
+        .bearer_auth(token)
+        .send()
+        .await
+        .expect("provider failure");
+    assert_eq!(unavailable.status(), 503);
+    let body: serde_json::Value = unavailable.json().await.expect("error envelope");
+    assert_eq!(body["error"], "provider_unavailable");
 }
 
 #[tokio::test]

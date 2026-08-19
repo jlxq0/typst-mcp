@@ -432,20 +432,33 @@ async fn download(
         return not_found();
     };
 
+    let has_authorization = headers.contains_key(header::AUTHORIZATION);
+    let mut provider_unavailable = false;
     let authorised = match state.api_key_auth.authenticate(&headers) {
         // A credential must belong to the tenant in the path, or any valid key could
         // read any tenant's documents.
         Ok(caller) => caller.principal.tenant(&state.config.tenant_salt) == tenant,
+        Err(_) if state.oidc_auth.is_configured() => {
+            match state.oidc_auth.authenticate(&headers).await {
+                Ok(caller) => caller.principal.tenant(&state.config.tenant_salt) == tenant,
+                Err(AuthError::ProviderUnavailable) => {
+                    provider_unavailable = true;
+                    false
+                }
+                Err(_) => false,
+            }
+        }
         Err(_) => false,
     };
 
     if !authorised {
-        match state.render.signer().verify_params(
+        let signature = state.render.signer().verify_params(
             &tenant,
             &job,
             params.get("exp").map(String::as_str),
             params.get("sig").map(String::as_str),
-        ) {
+        );
+        match signature {
             Ok(()) => {}
             Err(SignatureError::Expired) => {
                 return ApiError::expired("this link has expired; request a fresh one")
@@ -453,6 +466,18 @@ async fn download(
             }
             // An invalid or absent signature is indistinguishable from a wrong id on
             // purpose: probing must not reveal which documents exist.
+            Err(_) if provider_unavailable => {
+                return ApiError::auth(AuthError::ProviderUnavailable, state.oidc_auth.challenge())
+                    .into_response();
+            }
+            Err(SignatureError::Missing) if !has_authorization => {
+                let challenge = if state.oidc_auth.is_configured() {
+                    state.oidc_auth.challenge()
+                } else {
+                    state.api_key_auth.challenge()
+                };
+                return ApiError::auth(AuthError::Missing, challenge).into_response();
+            }
             Err(_) => return not_found(),
         }
     }
