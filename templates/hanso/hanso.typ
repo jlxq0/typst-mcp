@@ -6,7 +6,7 @@
 // address / contact / bank footer. Light + dark themes from the website tokens
 // (hanso_web/assets/css/hanso_theme.css). The brand SVGs (logo, stripe sweep,
 // contact icons) are embedded below as minified strings – no assets/ needed;
-// the canonical artwork lives in assets/.
+// the canonical artwork lives in ../assets/.
 //
 // Requires: Typst 0.13+ and the Figtree font family (installed or --font-path).
 //

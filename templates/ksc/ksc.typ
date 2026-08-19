@@ -2,8 +2,8 @@
 // Kampong Social Club brand template for documents (Typst) - self-contained,
 // single file.
 //
-// The KSC counterpart to ../../hanso/ (whose Typst library lives at
-// OfficeMaster typst/hanso.typ). It shares that file's *shape* - a single
+// The KSC counterpart to ../../hanso/, whose Typst library lives at
+// OfficeMaster brands/hanso/typst/hanso.typ. It shares that file's *shape* - a single
 // wrapper function, embedded single-ink artwork, light + dark themes, a
 // full/simple footer switch - and none of its brand: no stripe sweeps, no
 // hexagon icons, no Figtree, no Hanso defaults.
