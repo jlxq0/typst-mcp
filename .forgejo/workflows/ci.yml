@@ -21,6 +21,22 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with: { persist-credentials: false }
+      # Cross-repository drift is checked on trusted pushes. Pull requests do not
+      # receive this read token; main cannot become a release tag until this check runs.
+      - name: Checkout canonical OfficeMaster templates
+        if: github.event_name != 'pull_request'
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          repository: thehansogroup/OfficeMaster
+          ref: feat/ksc-typst-template
+          path: .upstream/OfficeMaster
+          token: ${{ secrets.FORGE_PUSH_TOKEN }}
+          persist-credentials: false
+      - name: Check vendored template drift
+        if: github.event_name != 'pull_request'
+        env:
+          OFFICEMASTER_DIR: ${{ github.workspace }}/.upstream/OfficeMaster
+        run: scripts/sync-templates.sh --check
       # Pin a commit on master, not on `stable`. Forge resolves actions from its
       # own mirrors (DEFAULT_ACTIONS_URL = forge.oddie.app), and dtolnay
       # force-pushes `stable`, so the mirror's 24h sync prunes the old tip and

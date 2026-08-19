@@ -9,8 +9,6 @@
 #   scripts/sync-templates.sh            # copy in, and record the upstream commit
 #   scripts/sync-templates.sh --check    # fail if the vendored copy has drifted (CI)
 #
-# The check is a no-op when OfficeMaster is not checked out, so CI runners without it
-# stay green rather than failing on something they cannot see.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -21,10 +19,6 @@ CHECK=false
 [[ "${1:-}" == "--check" ]] && CHECK=true
 
 if [[ ! -d "$SOURCE" ]]; then
-  if $CHECK; then
-    echo "sync-templates: $SOURCE not present; skipping drift check"
-    exit 0
-  fi
   echo "sync-templates: $SOURCE not found. Set OFFICEMASTER_DIR." >&2
   exit 1
 fi
@@ -35,6 +29,7 @@ fi
 # land under brands/<name>/typst/ as they are ported. Add a line per brand.
 BRANDS=(
   "hanso:typst/hanso.typ"
+  "ksc:brands/ksc/typst/ksc.typ"
 )
 
 fail=0
@@ -57,13 +52,14 @@ for entry in "${BRANDS[@]}"; do
       fail=1
     fi
   else
+    mkdir -p "$(dirname "$dest")"
     cp "$src" "$dest"
     echo "sync-templates: updated $name"
   fi
 done
 
 if ! $CHECK && [[ $fail -eq 0 ]]; then
-  commit="$(git -C "$SOURCE" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+  commit="$(git -C "$SOURCE" rev-parse HEAD 2>/dev/null || echo unknown)"
   # `sed -i` needs an argument on BSD and must not have one on GNU; the .bak dance
   # works on both.
   sed -i.bak -E \

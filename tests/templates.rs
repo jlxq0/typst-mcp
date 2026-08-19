@@ -59,6 +59,12 @@ fn the_brand_font_is_available() {
             .take(20)
             .collect::<Vec<_>>()
     );
+    for family in ["Inter", "Passion One"] {
+        assert!(
+            fonts.has_family(family),
+            "{family} is not in the baked font set; KSC documents would fall back"
+        );
+    }
 }
 
 #[test]
@@ -123,8 +129,37 @@ fn every_template_renders_from_its_own_fixture() {
                 "{} emitted an error diagnostic: {diagnostic:?}",
                 template.name()
             );
+            assert!(
+                !diagnostic.message.contains("unknown font family"),
+                "{} fell back to a substitute font: {diagnostic:?}",
+                template.name()
+            );
         }
     }
+}
+
+#[test]
+fn the_ksc_template_embeds_both_brand_families() {
+    let set = templates();
+    let template = set.get("ksc").expect("the KSC template must be present");
+    let assembled = template
+        .assemble(
+            template.example().expect("KSC fixture"),
+            template.example_body(),
+            vec![],
+            8 * 1024 * 1024,
+        )
+        .expect("KSC assembles");
+    let out = compile(&assembled.bundle, fonts(), &CompileOptions::default())
+        .unwrap_or_else(|e| panic!("KSC compile failed: {e}\n{:#?}", e.diagnostics()));
+    let pdf = String::from_utf8_lossy(&out.pdf);
+    for family in ["Inter", "PassionOne"] {
+        assert!(
+            pdf.contains(family),
+            "KSC PDF has no embedded {family} subset"
+        );
+    }
+    assert!(out.pages >= 3, "expected KSC cover, contents and body");
 }
 
 #[test]

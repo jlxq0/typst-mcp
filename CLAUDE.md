@@ -15,8 +15,9 @@ Specs in `.spec/`, ordered tasks in `Plan.md`, success criteria in `GOAL.md`.
   OIDC bearer downloads with signed-link outage fallback, the eighth text-only
   `typst_upload_template` tool, tenant-scoped ephemeral resolution, and REST tar/gzip
   template upload/deletion. Full compile/render arguments, asset roles/filters, and
-  RAII-workspace-scoped uploaded fonts are also implemented. Metrics/OTLP/audit and
-  smoke/soak CI remain Plan completion gaps.
+  RAII-workspace-scoped uploaded fonts are also implemented. KSC is vendored from the
+  canonical OfficeMaster commit with its schema, safe fixture and licensed brand fonts.
+  Metrics/OTLP/audit and smoke/soak CI remain Plan completion gaps.
 - The live store is a 5 GiB ReadWriteOnce PVC on one replica with `Recreate` rollout. It
   survives pod replacement; TTL and LRU quotas govern content, and PVC capacity is the
   final disk bound. It is still a re-creatable cache, not durable business storage.

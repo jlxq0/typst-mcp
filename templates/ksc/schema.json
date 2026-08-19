@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Kampong Social Club document",
+  "description": "Metadata for a KSC-branded document. Omitted fields use reviewed defaults from the canonical template.",
+  "type": "object",
+  "required": ["title"],
+  "additionalProperties": false,
+  "properties": {
+    "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "subtitle": { "type": "string", "maxLength": 240 },
+    "recipient": { "type": "string", "maxLength": 160 },
+    "author": { "type": "string", "maxLength": 160 },
+    "date": {
+      "type": "string",
+      "format": "date",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+    },
+    "theme": { "enum": ["light", "dark"], "default": "light" },
+    "footer_style": { "enum": ["full", "simple"], "default": "full" },
+    "org": { "type": "string", "maxLength": 160 },
+    "address": {
+      "type": "array",
+      "items": { "type": "string", "maxLength": 160 },
+      "maxItems": 6
+    },
+    "email": { "type": "string", "maxLength": 160 },
+    "web": { "type": "string", "maxLength": 160 },
+    "social": { "type": "string", "maxLength": 160 },
+    "legal": {
+      "type": "array",
+      "items": { "type": "string", "maxLength": 160 },
+      "maxItems": 6
+    },
+    "support": { "type": "string", "maxLength": 160 },
+    "confidentiality": { "type": "string", "maxLength": 160 },
+    "contents": { "type": "boolean", "default": true }
+  }
+}
