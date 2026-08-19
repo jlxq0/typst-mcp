@@ -40,10 +40,13 @@ and **seven** MCP tools. Current `main` has completed the eighth text-only
 and deletion, path-only worker I/O, true no-store direct PDF, shared sanitized HTTP/MCP
 errors, tenant-bound OIDC downloads, full compile/render arguments, asset role filters and
 per-job uploaded fonts without cross-job leakage. KSC and Lenno are now vendored from their
-canonical OfficeMaster sources with schemas, realistic fixtures, licensed fonts and embedded-family assertions.
+canonical OfficeMaster sources with schemas, realistic fixtures, licensed fonts and
+embedded-family assertions.
 The 15-family distributable font set is pinned and licence-verified in CI. Observability,
-Freudenberg, and release smoke/soak gates remain completion work. None of the current-main
-additions is production evidence until released.
+including a separate bounded Prometheus listener, optional OTLP traces and envelope-only
+audit events, is implemented with content-leak tests. Freudenberg and release smoke/soak
+gates remain completion work. None of the current-main additions is production evidence
+until released.
 
 ## 2. Why in-process Typst rather than shelling out
 

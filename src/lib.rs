@@ -10,6 +10,7 @@
 //! from accumulating. See [`worker`] for why that is not optional.
 
 pub mod api;
+pub mod audit;
 pub mod auth;
 pub mod bundle;
 pub mod compile;
@@ -19,6 +20,7 @@ pub mod error;
 pub mod fonts;
 pub mod job_io;
 pub mod mcp;
+pub mod metrics;
 pub mod oauth_metadata;
 pub mod oauth_proxy;
 pub mod oauth_redirect;
@@ -30,6 +32,7 @@ pub mod server;
 pub mod signing;
 pub mod spawn;
 pub mod store;
+pub mod telemetry;
 pub mod templates;
 pub mod typst_value;
 pub mod worker;

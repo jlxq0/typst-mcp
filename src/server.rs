@@ -5,6 +5,7 @@ use std::sync::Arc;
 use crate::api::{AppState, router};
 use crate::auth::{ApiKeyAuth, OidcAuth};
 use crate::config::Config;
+use crate::metrics::Metrics;
 use crate::render::RenderService;
 use crate::signing::Signer;
 use crate::spawn::{CompileService, SpawnConfig};
@@ -23,6 +24,7 @@ impl Server {
         let config = Arc::new(config);
 
         let store = Arc::new(Store::open(&config.data_dir, config.limits.clone())?);
+        let metrics = Arc::new(Metrics::default());
         let templates = TemplateSet::load(&config.template_dir)?;
 
         let mut spawn = match &config.worker_exe {
@@ -38,12 +40,18 @@ impl Server {
             templates,
             Arc::clone(&store),
             Signer::new(config.signing_secret.clone()),
+            Arc::clone(&metrics),
         ));
 
         let state = AppState {
-            api_key_auth: ApiKeyAuth::new(config.api_keys.clone()),
-            oidc_auth: OidcAuth::new(config.oidc.clone(), &config.metadata_url()),
+            api_key_auth: ApiKeyAuth::with_metrics(config.api_keys.clone(), Arc::clone(&metrics)),
+            oidc_auth: OidcAuth::with_metrics(
+                config.oidc.clone(),
+                &config.metadata_url(),
+                Arc::clone(&metrics),
+            ),
             render,
+            metrics,
             config,
         };
 
@@ -59,6 +67,7 @@ impl Server {
     pub async fn serve(self) -> anyhow::Result<()> {
         let config = Arc::clone(&self.state.config);
         let listener = tokio::net::TcpListener::bind(config.bind_addr).await?;
+        let metrics_listener = tokio::net::TcpListener::bind(config.metrics_bind_addr).await?;
 
         tracing::info!(
             addr = %config.bind_addr,
@@ -68,6 +77,7 @@ impl Server {
             oidc = self.state.oidc_auth.is_configured(),
             "typst-mcp listening"
         );
+        tracing::info!(addr = %config.metrics_bind_addr, "metrics listening");
 
         self.spawn_reaper();
 
@@ -111,9 +121,18 @@ impl Server {
                 config.max_upload_bytes,
             ));
 
-        axum::serve(listener, app)
-            .with_graceful_shutdown(shutdown_signal())
-            .await?;
+        let metrics_app =
+            crate::metrics::router(Arc::clone(&self.state.metrics), Arc::clone(&self.store));
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        tokio::spawn(async move {
+            shutdown_signal().await;
+            let _ = shutdown_tx.send(true);
+        });
+        let public = axum::serve(listener, app)
+            .with_graceful_shutdown(wait_for_shutdown(shutdown_rx.clone()));
+        let metrics = axum::serve(metrics_listener, metrics_app)
+            .with_graceful_shutdown(wait_for_shutdown(shutdown_rx));
+        tokio::try_join!(public, metrics)?;
         Ok(())
     }
 
@@ -142,8 +161,14 @@ async fn shutdown_signal() {
     tracing::info!("shutting down");
 }
 
+async fn wait_for_shutdown(mut shutdown: tokio::sync::watch::Receiver<bool>) {
+    if !*shutdown.borrow() {
+        let _ = shutdown.changed().await;
+    }
+}
+
 /// Set up logging from `TYPST_MCP_LOG_FORMAT` and `RUST_LOG`.
-pub fn init_tracing() {
+pub fn init_tracing() -> anyhow::Result<Option<crate::telemetry::Telemetry>> {
     use tracing_subscriber::prelude::*;
 
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
@@ -153,12 +178,27 @@ pub fn init_tracing() {
         .map(|v| v.eq_ignore_ascii_case("json"))
         .unwrap_or(true);
 
-    let registry = tracing_subscriber::registry().with(filter);
+    let telemetry = crate::telemetry::Telemetry::from_env()?;
     if json {
-        registry
+        tracing_subscriber::registry()
+            .with(filter)
             .with(tracing_subscriber::fmt::layer().json())
-            .init();
+            .with(
+                telemetry
+                    .as_ref()
+                    .map(|otel| tracing_opentelemetry::layer().with_tracer(otel.tracer())),
+            )
+            .try_init()?;
     } else {
-        registry.with(tracing_subscriber::fmt::layer()).init();
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(tracing_subscriber::fmt::layer())
+            .with(
+                telemetry
+                    .as_ref()
+                    .map(|otel| tracing_opentelemetry::layer().with_tracer(otel.tracer())),
+            )
+            .try_init()?;
     }
+    Ok(telemetry)
 }

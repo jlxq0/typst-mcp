@@ -44,7 +44,7 @@ fn main() -> ExitCode {
 }
 
 async fn serve() -> anyhow::Result<()> {
-    init_tracing();
+    let _telemetry = init_tracing()?;
     let config = Config::from_env()?;
     Server::build(config)?.serve().await
 }

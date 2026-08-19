@@ -11,12 +11,14 @@ Self-host the `/mcp` endpoint on your own domain.
 
 Production currently runs `v0.1.8` at `https://typst-mcp.hanso.group`. It ships one
 Hanso template and seven MCP tools. Current `main` ships Hanso, KSC and Lenno and exposes
-the full eight-tool surface, including text-only `typst_upload_template`, and adds tenant-scoped ephemeral template
-resolution plus safe REST tar/gzip upload and deletion. It has also replaced bulk worker
+the full eight-tool surface, including text-only `typst_upload_template`, and adds
+tenant-scoped ephemeral template resolution plus safe REST tar/gzip upload and deletion.
+It has also replaced bulk worker
 frames with parent-staged path-only I/O, made direct-PDF responses no-store, unified error
 mapping, added tenant-bound OIDC downloads, completed the MCP argument/filter surface, and
-isolated uploaded fonts to one job. Metrics/OTLP, the Freudenberg template, and image
-smoke/soak gates remain implementation work;
+isolated uploaded fonts to one job. It also exposes bounded Prometheus metrics on a
+separate listener, optionally exports OTLP traces, and emits content-free audit envelopes.
+The Freudenberg template and image smoke/soak gates remain implementation work;
 deployed `v0.1.8` predates all current-main checkpoints. See `Plan.md` for the checklist.
 
 ## Shape (RFC 9728 / MCP authorization)
@@ -104,6 +106,13 @@ OIDC is configured.
 | `TYPST_MCP_FONT_DIRS` | `/usr/share/fonts/typst` | Colon-separated font dirs |
 | `TYPST_MCP_LOG_FORMAT` | `json` | `json` or pretty |
 | `TYPST_MCP_COMPILE_TIMEOUT` | `20s` | Per-compile deadline (`20`, `20s`, `15m`, `2h`, `7d`) |
+| `TYPST_MCP_METRICS_BIND_ADDR` | `0.0.0.0:9090` | Separate listener exposing only `GET /metrics` |
+
+Set the standard OpenTelemetry variables `OTEL_EXPORTER_OTLP_ENDPOINT` and, optionally,
+`OTEL_SERVICE_NAME` to export traces over OTLP/gRPC. With no endpoint, no exporter or
+telemetry connection is created. Metrics and audit events contain bounded operational
+labels and counts only; source, input data, rendered content, diagnostics, and credentials
+are excluded by their APIs and regression tests.
 
 ## Entra app (click-path)
 

@@ -70,6 +70,7 @@ pub struct OidcConfig {
 pub struct Config {
     pub public_url: String,
     pub bind_addr: SocketAddr,
+    pub metrics_bind_addr: SocketAddr,
     pub data_dir: PathBuf,
     pub template_dir: PathBuf,
     pub font_dirs: Vec<PathBuf>,
@@ -186,6 +187,7 @@ impl Config {
         Ok(Self {
             public_url,
             bind_addr: parse(get, "BIND_ADDR", "0.0.0.0:3000", "socket address")?,
+            metrics_bind_addr: parse(get, "METRICS_BIND_ADDR", "0.0.0.0:9090", "socket address")?,
             data_dir: path(get, "DATA_DIR", "/data"),
             template_dir: path(get, "TEMPLATE_DIR", "/usr/share/typst-mcp/templates"),
             font_dirs: get("FONT_DIRS")
@@ -388,6 +390,7 @@ mod tests {
     fn a_minimal_environment_loads_with_defaults() {
         let config = load(&[]).expect("loads");
         assert_eq!(config.bind_addr.port(), 3000);
+        assert_eq!(config.metrics_bind_addr.port(), 9090);
         assert_eq!(config.compile_timeout, Duration::from_secs(20));
         assert_eq!(config.max_pages, 200);
         assert_eq!(config.preview_max_px, 2000);
@@ -541,6 +544,7 @@ mod tests {
             ("COMPILE_TIMEOUT", "10x", "duration"),
             ("MAX_PAGES", "lots", "number"),
             ("BIND_ADDR", "not-an-address", "socket"),
+            ("METRICS_BIND_ADDR", "not-an-address", "socket"),
         ] {
             let err = load(&[(name, value)]).expect_err("must fail");
             let message = err.to_string();

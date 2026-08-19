@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::auth::{ApiKeyAuth, AuthError, Authenticated, OidcAuth, unauthorized};
 use crate::config::Config;
 use crate::error::ApiError;
+use crate::metrics::Metrics;
 use crate::oauth_metadata::{authorization_server_metadata, protected_resource_metadata, register};
 use crate::oauth_proxy::{self, OAuthProxyState};
 use crate::principal::TenantId;
@@ -26,6 +27,7 @@ use crate::templates::TemplateKind;
 pub struct AppState {
     pub config: Arc<Config>,
     pub render: Arc<RenderService>,
+    pub metrics: Arc<Metrics>,
     pub api_key_auth: ApiKeyAuth,
     pub oidc_auth: OidcAuth,
 }
@@ -221,10 +223,40 @@ async fn render(
     Json(request): Json<RenderRequest>,
 ) -> Response {
     let tenant = caller.tenant(&state);
+    let started = std::time::Instant::now();
+    let template = request.template.clone();
     match query.output.as_deref() {
         None | Some("json") => match state.render.render(&tenant, &request).await {
-            Ok(result) => Json(result).into_response(),
-            Err(err) => ApiError::from(err).into_response(),
+            Ok(result) => {
+                crate::audit::AuditEvent {
+                    tenant_fp: &caller.0.fingerprint,
+                    operation: "rest_render",
+                    job_id: Some(&result.job_id),
+                    template: template.as_deref(),
+                    bytes: result.bytes,
+                    pages: result.pages,
+                    duration_ms: started.elapsed().as_millis(),
+                    outcome: "success",
+                    diagnostic_count: result.diagnostics.len(),
+                }
+                .emit();
+                Json(result).into_response()
+            }
+            Err(err) => {
+                crate::audit::AuditEvent {
+                    tenant_fp: &caller.0.fingerprint,
+                    operation: "rest_render",
+                    job_id: None,
+                    template: template.as_deref(),
+                    bytes: 0,
+                    pages: 0,
+                    duration_ms: started.elapsed().as_millis(),
+                    outcome: "error",
+                    diagnostic_count: err.diagnostics().len(),
+                }
+                .emit();
+                ApiError::from(err).into_response()
+            }
         },
         Some("pdf") => {
             // Direct PDF is structurally no-store: it calls compile(), not render(),
@@ -232,19 +264,47 @@ async fn render(
             let mut request = request;
             request.preview_pages = Some(vec![]);
             match state.render.compile(&tenant, &request).await {
-                Ok(result) => (
-                    StatusCode::OK,
-                    [
-                        (header::CONTENT_TYPE, "application/pdf".to_owned()),
-                        (
-                            header::CONTENT_DISPOSITION,
-                            format!("inline; filename=\"{DOCUMENT_NAME}\""),
-                        ),
-                    ],
-                    result.pdf,
-                )
-                    .into_response(),
-                Err(err) => ApiError::from(err).into_response(),
+                Ok(result) => {
+                    crate::audit::AuditEvent {
+                        tenant_fp: &caller.0.fingerprint,
+                        operation: "rest_compile",
+                        job_id: None,
+                        template: template.as_deref(),
+                        bytes: result.pdf.len(),
+                        pages: result.pages,
+                        duration_ms: started.elapsed().as_millis(),
+                        outcome: "success",
+                        diagnostic_count: result.diagnostics.len(),
+                    }
+                    .emit();
+                    (
+                        StatusCode::OK,
+                        [
+                            (header::CONTENT_TYPE, "application/pdf".to_owned()),
+                            (
+                                header::CONTENT_DISPOSITION,
+                                format!("inline; filename=\"{DOCUMENT_NAME}\""),
+                            ),
+                        ],
+                        result.pdf,
+                    )
+                        .into_response()
+                }
+                Err(err) => {
+                    crate::audit::AuditEvent {
+                        tenant_fp: &caller.0.fingerprint,
+                        operation: "rest_compile",
+                        job_id: None,
+                        template: template.as_deref(),
+                        bytes: 0,
+                        pages: 0,
+                        duration_ms: started.elapsed().as_millis(),
+                        outcome: "error",
+                        diagnostic_count: err.diagnostics().len(),
+                    }
+                    .emit();
+                    ApiError::from(err).into_response()
+                }
             }
         }
         Some(_) => ApiError::bad_request("output must be `json` or `pdf`").into_response(),
@@ -364,19 +424,63 @@ async fn upload_template(
     caller: Caller,
     body: axum::body::Bytes,
 ) -> Response {
+    let started = std::time::Instant::now();
     let template =
         match crate::templates::Template::from_archive(&body, state.config.max_bundle_bytes) {
             Ok(template) => template,
-            Err(error) => return ApiError::from(error).into_response(),
+            Err(error) => {
+                crate::audit::AuditEvent {
+                    tenant_fp: &caller.0.fingerprint,
+                    operation: "rest_upload_template",
+                    job_id: None,
+                    template: None,
+                    bytes: body.len(),
+                    pages: 0,
+                    duration_ms: started.elapsed().as_millis(),
+                    outcome: "error",
+                    diagnostic_count: 0,
+                }
+                .emit();
+                return ApiError::from(error).into_response();
+            }
         };
+    let template_name = template.name().to_owned();
     let tenant = caller.tenant(&state);
     match state
         .render
         .upload_template(&tenant, None, template.source_files(), &[])
         .await
     {
-        Ok(uploaded) => (StatusCode::CREATED, Json(uploaded)).into_response(),
-        Err(error) => ApiError::from(error).into_response(),
+        Ok(uploaded) => {
+            crate::audit::AuditEvent {
+                tenant_fp: &caller.0.fingerprint,
+                operation: "rest_upload_template",
+                job_id: None,
+                template: Some(&template_name),
+                bytes: body.len(),
+                pages: 0,
+                duration_ms: started.elapsed().as_millis(),
+                outcome: "success",
+                diagnostic_count: uploaded.warnings.len(),
+            }
+            .emit();
+            (StatusCode::CREATED, Json(uploaded)).into_response()
+        }
+        Err(error) => {
+            crate::audit::AuditEvent {
+                tenant_fp: &caller.0.fingerprint,
+                operation: "rest_upload_template",
+                job_id: None,
+                template: Some(&template_name),
+                bytes: body.len(),
+                pages: 0,
+                duration_ms: started.elapsed().as_millis(),
+                outcome: "error",
+                diagnostic_count: error.diagnostics().len(),
+            }
+            .emit();
+            ApiError::from(error).into_response()
+        }
     }
 }
 
@@ -414,6 +518,7 @@ async fn upload_asset(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
+    let started = std::time::Instant::now();
     // Normalised here, so a hostile path is refused before anything is written.
     let path = match crate::bundle::normalise_path(&query.path) {
         Ok(path) => path,
@@ -450,16 +555,45 @@ async fn upload_asset(
             asset_role: Some(asset_role),
         },
     ) {
-        Ok(entry) => Json(serde_json::json!({
-            "id": entry.id,
-            "path": path,
-            "content_type": content_type,
-            "kind": asset_role.as_str(),
-            "bytes": entry.bytes,
-            "expires_at": entry.expires_at,
-        }))
-        .into_response(),
-        Err(err) => ApiError::from(err).into_response(),
+        Ok(entry) => {
+            state.metrics.upload("asset");
+            crate::audit::AuditEvent {
+                tenant_fp: &caller.0.fingerprint,
+                operation: "rest_upload_asset",
+                job_id: None,
+                template: None,
+                bytes: body.len(),
+                pages: 0,
+                duration_ms: started.elapsed().as_millis(),
+                outcome: "success",
+                diagnostic_count: 0,
+            }
+            .emit();
+            Json(serde_json::json!({
+                "id": entry.id,
+                "path": path,
+                "content_type": content_type,
+                "kind": asset_role.as_str(),
+                "bytes": entry.bytes,
+                "expires_at": entry.expires_at,
+            }))
+            .into_response()
+        }
+        Err(err) => {
+            crate::audit::AuditEvent {
+                tenant_fp: &caller.0.fingerprint,
+                operation: "rest_upload_asset",
+                job_id: None,
+                template: None,
+                bytes: body.len(),
+                pages: 0,
+                duration_ms: started.elapsed().as_millis(),
+                outcome: "error",
+                diagnostic_count: 0,
+            }
+            .emit();
+            ApiError::from(err).into_response()
+        }
     }
 }
 

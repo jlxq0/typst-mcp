@@ -36,6 +36,18 @@
   into credential exposure. Start from `env_clear()` and restore only the reviewed
   backtrace controls. Filesystem and network isolation remain separate boundaries.
 
+- **Process metrics must aggregate observations instead of retaining samples.** A
+  Prometheus histogram that stores every duration or byte count in a vector grows for
+  the full process lifetime under normal traffic. Keep only the fixed cumulative
+  bucket counters, total count, and sum; test that retained state stays constant as the
+  observation count grows.
+
+- **Length and character bounds do not make request-derived telemetry labels safe.** A
+  short alphanumeric template name can still be customer data or a credential. Reduce
+  request-derived metric and audit labels to a fixed operational vocabulary, validate
+  opaque server-generated ids before emitting them, and exercise every string-shaped
+  audit field with content and credential canaries.
+
 - **Classify a domain failure once, before choosing HTTP or MCP transport.** Separate
   surface mappings made an oversized bundle a REST 422 while the specification required
   413, and some MCP failures were returned as success-shaped JSON. Route auth, render,

@@ -13,6 +13,7 @@ use axum::response::{IntoResponse, Response};
 use std::sync::Arc;
 
 use crate::config::OidcConfig;
+use crate::metrics::Metrics;
 use crate::oidc::{TokenError, TokenValidator};
 use crate::principal::{ApiKeys, Principal};
 
@@ -40,6 +41,16 @@ pub enum AuthError {
 }
 
 impl AuthError {
+    fn metric_reason(self) -> &'static str {
+        match self {
+            Self::Missing => "missing",
+            Self::Malformed => "malformed",
+            Self::Rejected => "rejected",
+            Self::Unavailable => "unconfigured",
+            Self::ProviderUnavailable => "provider_unavailable",
+        }
+    }
+
     /// What to tell the caller.
     ///
     /// Deliberately vague about *why* a credential was rejected — distinguishing
@@ -99,29 +110,41 @@ pub fn bearer(headers: &HeaderMap) -> Result<&str, AuthError> {
 pub struct ApiKeyAuth {
     keys: ApiKeys,
     challenge: String,
+    metrics: Arc<Metrics>,
 }
 
 impl ApiKeyAuth {
     pub fn new(keys: ApiKeys) -> Self {
+        Self::with_metrics(keys, Arc::new(Metrics::default()))
+    }
+
+    pub fn with_metrics(keys: ApiKeys, metrics: Arc<Metrics>) -> Self {
         Self {
             keys,
             challenge: "Bearer".to_owned(),
+            metrics,
         }
     }
 
     pub fn authenticate(&self, headers: &HeaderMap) -> Result<Authenticated, AuthError> {
-        if self.keys.is_empty() {
-            return Err(AuthError::Unavailable);
+        let result = (|| {
+            if self.keys.is_empty() {
+                return Err(AuthError::Unavailable);
+            }
+            let presented = bearer(headers)?;
+            let key = self
+                .keys
+                .authenticate(presented)
+                .ok_or(AuthError::Rejected)?;
+            Ok(Authenticated {
+                principal: key.principal(),
+                fingerprint: key.fingerprint().to_owned(),
+            })
+        })();
+        if let Err(error) = &result {
+            self.metrics.auth_failure((*error).metric_reason());
         }
-        let presented = bearer(headers)?;
-        let key = self
-            .keys
-            .authenticate(presented)
-            .ok_or(AuthError::Rejected)?;
-        Ok(Authenticated {
-            principal: key.principal(),
-            fingerprint: key.fingerprint().to_owned(),
-        })
+        result
     }
 
     /// The `WWW-Authenticate` value to send with a 401.
@@ -139,10 +162,19 @@ pub struct OidcAuth {
     config: Option<OidcConfig>,
     validator: Option<Arc<TokenValidator>>,
     challenge: String,
+    metrics: Arc<Metrics>,
 }
 
 impl OidcAuth {
     pub fn new(config: Option<OidcConfig>, metadata_url: &str) -> Self {
+        Self::with_metrics(config, metadata_url, Arc::new(Metrics::default()))
+    }
+
+    pub fn with_metrics(
+        config: Option<OidcConfig>,
+        metadata_url: &str,
+        metrics: Arc<Metrics>,
+    ) -> Self {
         let challenge = match &config {
             Some(cfg) => format!(
                 "Bearer resource_metadata=\"{metadata_url}\", scope=\"{}\"",
@@ -155,27 +187,35 @@ impl OidcAuth {
             config,
             validator,
             challenge,
+            metrics,
         }
     }
 
     /// Validate the request's bearer token.
     pub async fn authenticate(&self, headers: &HeaderMap) -> Result<Authenticated, AuthError> {
-        let Some(validator) = &self.validator else {
-            return Err(AuthError::Unavailable);
-        };
-        let token = bearer(headers)?;
-        match validator.validate(token).await {
-            Ok(principal) => Ok(Authenticated {
-                fingerprint: crate::principal::fingerprint(principal.display()),
-                principal,
-            }),
-            // A provider we cannot reach is our failure, not a bad credential — telling
-            // the caller their token was rejected would send them to re-authenticate
-            // for no reason.
-            Err(TokenError::ProviderUnavailable) => Err(AuthError::ProviderUnavailable),
-            Err(TokenError::Malformed) => Err(AuthError::Malformed),
-            Err(_) => Err(AuthError::Rejected),
+        let result = async {
+            let Some(validator) = &self.validator else {
+                return Err(AuthError::Unavailable);
+            };
+            let token = bearer(headers)?;
+            match validator.validate(token).await {
+                Ok(principal) => Ok(Authenticated {
+                    fingerprint: crate::principal::fingerprint(principal.display()),
+                    principal,
+                }),
+                // A provider we cannot reach is our failure, not a bad credential — telling
+                // the caller their token was rejected would send them to re-authenticate
+                // for no reason.
+                Err(TokenError::ProviderUnavailable) => Err(AuthError::ProviderUnavailable),
+                Err(TokenError::Malformed) => Err(AuthError::Malformed),
+                Err(_) => Err(AuthError::Rejected),
+            }
         }
+        .await;
+        if let Err(error) = &result {
+            self.metrics.auth_failure((*error).metric_reason());
+        }
+        result
     }
 
     pub fn is_configured(&self) -> bool {

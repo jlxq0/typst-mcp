@@ -191,10 +191,14 @@ impl TypstMcp {
     /// without one is a routing mistake, and inventing a tenant would turn that mistake
     /// into silent cross-tenant access.
     fn tenant(&self, ctx: &RequestContext<RoleServer>) -> Result<TenantId, McpError> {
+        Ok(self.caller(ctx)?.principal.tenant(&self.config.tenant_salt))
+    }
+
+    fn caller(&self, ctx: &RequestContext<RoleServer>) -> Result<Authenticated, McpError> {
         ctx.extensions
             .get::<http::request::Parts>()
             .and_then(|parts| parts.extensions.get::<Authenticated>())
-            .map(|caller| caller.principal.tenant(&self.config.tenant_salt))
+            .cloned()
             .ok_or_else(|| {
                 McpError::invalid_request("this request carried no authenticated caller", None)
             })
@@ -227,7 +231,14 @@ impl TypstMcp {
             preview_pages: clamp_pages(args.preview_pages),
             ..Default::default()
         };
-        self.run(&self.tenant(&ctx)?, request).await
+        let caller = self.caller(&ctx)?;
+        self.run(
+            &caller.principal.tenant(&self.config.tenant_salt),
+            &caller.fingerprint,
+            "typst_render",
+            request,
+        )
+        .await
     }
 
     #[tool(
@@ -256,7 +267,14 @@ impl TypstMcp {
             preview_pages: clamp_pages(args.preview_pages),
             ..Default::default()
         };
-        self.run(&self.tenant(&ctx)?, request).await
+        let caller = self.caller(&ctx)?;
+        self.run(
+            &caller.principal.tenant(&self.config.tenant_salt),
+            &caller.fingerprint,
+            "typst_compile",
+            request,
+        )
+        .await
     }
 
     #[tool(
@@ -343,6 +361,11 @@ impl TypstMcp {
         Parameters(args): Parameters<UploadTemplateArgs>,
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
+        let started = std::time::Instant::now();
+        let caller = self.caller(&ctx)?;
+        let tenant = caller.principal.tenant(&self.config.tenant_salt);
+        let template_name = args.name.clone();
+        let source_bytes = args.files.iter().map(|file| file.text.len()).sum();
         let files = args
             .files
             .into_iter()
@@ -350,14 +373,42 @@ impl TypstMcp {
             .collect();
         match self
             .render
-            .upload_template(&self.tenant(&ctx)?, Some(&args.name), files, &args.assets)
+            .upload_template(&tenant, Some(&args.name), files, &args.assets)
             .await
         {
-            Ok(uploaded) => json_result(
-                serde_json::to_value(uploaded)
-                    .map_err(|error| McpError::internal_error(error.to_string(), None))?,
-            ),
-            Err(error) => ApiError::from(error).into_mcp_result(),
+            Ok(uploaded) => {
+                crate::audit::AuditEvent {
+                    tenant_fp: &caller.fingerprint,
+                    operation: "typst_upload_template",
+                    job_id: None,
+                    template: Some(&template_name),
+                    bytes: source_bytes,
+                    pages: 0,
+                    duration_ms: started.elapsed().as_millis(),
+                    outcome: "success",
+                    diagnostic_count: uploaded.warnings.len(),
+                }
+                .emit();
+                json_result(
+                    serde_json::to_value(uploaded)
+                        .map_err(|error| McpError::internal_error(error.to_string(), None))?,
+                )
+            }
+            Err(error) => {
+                crate::audit::AuditEvent {
+                    tenant_fp: &caller.fingerprint,
+                    operation: "typst_upload_template",
+                    job_id: None,
+                    template: Some(&template_name),
+                    bytes: source_bytes,
+                    pages: 0,
+                    duration_ms: started.elapsed().as_millis(),
+                    outcome: "error",
+                    diagnostic_count: error.diagnostics().len(),
+                }
+                .emit();
+                ApiError::from(error).into_mcp_result()
+            }
         }
     }
 
@@ -453,10 +504,26 @@ impl TypstMcp {
     async fn run(
         &self,
         tenant: &TenantId,
+        tenant_fp: &str,
+        operation: &'static str,
         request: RenderRequest,
     ) -> Result<CallToolResult, McpError> {
+        let started = std::time::Instant::now();
+        let template = request.template.clone();
         match self.render.render(tenant, &request).await {
             Ok(result) => {
+                crate::audit::AuditEvent {
+                    tenant_fp,
+                    operation,
+                    job_id: Some(&result.job_id),
+                    template: template.as_deref(),
+                    bytes: result.bytes,
+                    pages: result.pages,
+                    duration_ms: started.elapsed().as_millis(),
+                    outcome: "success",
+                    diagnostic_count: result.diagnostics.len(),
+                }
+                .emit();
                 let mut blocks = vec![ContentBlock::json(serde_json::json!({
                     "job_id": result.job_id,
                     "url": result.url,
@@ -476,7 +543,21 @@ impl TypstMcp {
             }
             // Domain failures are tool-error content, not JSON-RPC transport errors:
             // the diagnostics remain available for the model to fix and retry.
-            Err(err) => ApiError::from(err).into_mcp_result(),
+            Err(err) => {
+                crate::audit::AuditEvent {
+                    tenant_fp,
+                    operation,
+                    job_id: None,
+                    template: template.as_deref(),
+                    bytes: 0,
+                    pages: 0,
+                    duration_ms: started.elapsed().as_millis(),
+                    outcome: "error",
+                    diagnostic_count: err.diagnostics().len(),
+                }
+                .emit();
+                ApiError::from(err).into_mcp_result()
+            }
         }
     }
 }

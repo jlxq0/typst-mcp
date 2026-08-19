@@ -19,7 +19,9 @@ Specs in `.spec/`, ordered tasks in `Plan.md`, success criteria in `GOAL.md`.
   from canonical OfficeMaster commits with schemas, safe fixtures and licensed brand fonts.
   Fifteen reviewed Google Fonts families are pinned with per-file checksums and licence
   texts; CI verifies the committed set offline.
-  Metrics/OTLP/audit and smoke/soak CI remain Plan completion gaps.
+  A separate `/metrics` listener, bounded Prometheus aggregates, optional OTLP tracing,
+  and envelope-only audit events are implemented with content-leak regression tests.
+  Smoke/soak CI remains a Plan completion gap.
 - The live store is a 5 GiB ReadWriteOnce PVC on one replica with `Recreate` rollout. It
   survives pod replacement; TTL and LRU quotas govern content, and PVC capacity is the
   final disk bound. It is still a re-creatable cache, not durable business storage.
@@ -31,6 +33,12 @@ Specs in `.spec/`, ordered tasks in `Plan.md`, success criteria in `GOAL.md`.
   against their final brand-local OfficeMaster paths; adding Freudenberg remains target work.
 
 ## Known Pitfalls
+
+- **Length and character bounds do not make telemetry labels content-free.** A short
+  alphanumeric template name can still carry customer data or a credential. Metrics and
+  audit events reduce request-derived labels to a fixed operational vocabulary and
+  validate opaque ids before logging; keep canary coverage across every string-shaped
+  audit field. Found 2026-08-19.
 
 - **Validate an entire asset list before reading any asset bytes.** The render path used
   to load each referenced asset into the long-lived parent process and only later let

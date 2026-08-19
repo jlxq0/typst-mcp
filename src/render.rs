@@ -15,6 +15,7 @@ use crate::bundle::{Bundle, BundleError, BundleFile, FileContent, MAX_FILES};
 use crate::config::Config;
 use crate::diagnostics::Diagnostic;
 use crate::job_io::{PDF_NAME, PreparedJob};
+use crate::metrics::Metrics;
 use crate::principal::TenantId;
 use crate::protocol::{JobLimits, JobResult};
 use crate::signing::Signer;
@@ -164,6 +165,7 @@ pub struct RenderService {
     signer: Signer,
     config: Arc<Config>,
     font_dirs: Vec<PathBuf>,
+    metrics: Arc<Metrics>,
 }
 
 impl RenderService {
@@ -173,6 +175,7 @@ impl RenderService {
         templates: TemplateSet,
         store: Arc<Store>,
         signer: Signer,
+        metrics: Arc<Metrics>,
     ) -> Self {
         let font_dirs = config.font_dirs.clone();
         Self {
@@ -182,6 +185,7 @@ impl RenderService {
             signer,
             config,
             font_dirs,
+            metrics,
         }
     }
 
@@ -207,9 +211,19 @@ impl RenderService {
         tenant: &TenantId,
         request: &RenderRequest,
     ) -> Result<CompiledDocument, RenderError> {
-        let (bundle, source_map) = self.assemble(tenant, request)?;
-        self.compile_bundle(bundle, source_map, self.job_limits(request))
-            .await
+        let label = request.template.as_deref().unwrap_or("source");
+        let observation = self.metrics.start_compile(label);
+        let result = async {
+            let (bundle, source_map) = self.assemble(tenant, request)?;
+            self.compile_bundle(bundle, source_map, self.job_limits(request))
+                .await
+        }
+        .await;
+        let summary = result
+            .as_ref()
+            .map(|document| (document.pages, document.pdf.len()));
+        observation.finish(&summary);
+        result
     }
 
     async fn compile_bundle(
@@ -353,9 +367,15 @@ impl RenderService {
                 preview_max_px: self.config.preview_max_px,
                 memory_bytes: self.config.worker_memory_bytes,
             };
+            let observation = self.metrics.start_compile("template_validation");
             let compiled = self
                 .compile_bundle(assembled.bundle, assembled.source_map, limits)
-                .await?;
+                .await;
+            let summary = compiled
+                .as_ref()
+                .map(|document| (document.pages, document.pdf.len()));
+            observation.finish(&summary);
+            let compiled = compiled?;
             warnings.extend(compiled.diagnostics.into_iter().map(|d| d.message));
         }
 
@@ -367,6 +387,7 @@ impl RenderService {
             &archive,
             Meta::new(STORED_ARCHIVE, "application/x-tar"),
         )?;
+        self.metrics.upload("template");
         Ok(UploadedTemplate {
             id: entry.id,
             name: template.name().to_owned(),

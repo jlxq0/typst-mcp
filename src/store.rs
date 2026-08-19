@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -181,6 +182,8 @@ pub struct Store {
     /// Accounting, rebuilt from disk at startup. A lock rather than a lock-free
     /// structure because eviction has to see a consistent total.
     index: Mutex<Index>,
+    expired_evictions: AtomicU64,
+    quota_evictions: AtomicU64,
 }
 
 #[derive(Debug, Default)]
@@ -201,6 +204,8 @@ impl Store {
             root,
             limits,
             index: Mutex::new(Index::default()),
+            expired_evictions: AtomicU64::new(0),
+            quota_evictions: AtomicU64::new(0),
         };
         store.rebuild_index()?;
         Ok(store)
@@ -359,6 +364,8 @@ impl Store {
         for (tenant, kind, id) in expired {
             self.remove(&tenant, kind, &id);
         }
+        self.expired_evictions
+            .fetch_add(count as u64, Ordering::Relaxed);
         count
     }
 
@@ -369,6 +376,23 @@ impl Store {
 
     pub fn tenant_bytes(&self, tenant: &TenantId) -> u64 {
         self.lock().per_tenant.get(tenant).copied().unwrap_or(0)
+    }
+
+    /// Opaque tenant partitions and their current byte counts, for metrics only.
+    pub fn tenant_usage(&self) -> Vec<(TenantId, u64)> {
+        self.lock()
+            .per_tenant
+            .iter()
+            .map(|(tenant, bytes)| (tenant.clone(), *bytes))
+            .collect()
+    }
+
+    /// Cumulative `(expired, quota)` eviction counts since process start.
+    pub fn evictions(&self) -> (u64, u64) {
+        (
+            self.expired_evictions.load(Ordering::Relaxed),
+            self.quota_evictions.load(Ordering::Relaxed),
+        )
     }
 
     pub fn len(&self) -> usize {
@@ -463,7 +487,10 @@ impl Store {
                     .map(|(key, _)| key.clone())
             };
             match victim {
-                Some((tenant, kind, id)) => self.remove(&tenant, kind, &id),
+                Some((tenant, kind, id)) => {
+                    self.remove(&tenant, kind, &id);
+                    self.quota_evictions.fetch_add(1, Ordering::Relaxed);
+                }
                 // Nothing left to evict; the accounting must be wrong rather than the
                 // disk genuinely full of nothing.
                 None => return Ok(()),
@@ -745,6 +772,7 @@ mod tests {
 
         assert_eq!(store.reap(), 1);
         assert_eq!(store.used_bytes(), 0);
+        assert_eq!(store.evictions(), (1, 0));
         assert!(store.is_empty());
     }
 
@@ -825,6 +853,7 @@ mod tests {
             "over budget: {}",
             store.used_bytes()
         );
+        assert!(store.evictions().1 >= 1);
         assert!(
             matches!(
                 store.entry(&alice, Kind::Asset, &first.id),
