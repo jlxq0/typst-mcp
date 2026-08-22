@@ -161,6 +161,7 @@ jobs:
           NETWORK="typst-mcp-smoke-${STACK_ID}"
           APP_CONTAINER="typst-mcp-smoke-${STACK_ID}"
           IDP_CONTAINER="typst-mcp-smoke-oidc-${STACK_ID}"
+          OIDC_VOLUME="typst-mcp-smoke-oidc-${STACK_ID}"
           DOCKER_IP="${DOCKER_HOST#tcp://}"
           DOCKER_IP="${DOCKER_IP%:2376}"
           SMOKE_PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
@@ -173,6 +174,7 @@ jobs:
           printf '%s\n' "$NETWORK" >"$SMOKE_DIR/network"
           printf '%s\n' "$APP_CONTAINER" >"$SMOKE_DIR/app-container"
           printf '%s\n' "$IDP_CONTAINER" >"$SMOKE_DIR/idp-container"
+          printf '%s\n' "$OIDC_VOLUME" >"$SMOKE_DIR/oidc-volume"
           printf '%s\n' "$BASE" >"$SMOKE_DIR/base"
           printf '%s\n' "$SMOKE_DIR" >"${RUNNER_TEMP}/typst-mcp-smoke-dir"
           openssl rand -hex 32 >"$SMOKE_DIR/api-key"
@@ -185,9 +187,16 @@ jobs:
           scripts/prepare-smoke-oidc.sh \
             "$SMOKE_DIR/oidc" "$SMOKE_DIR/token" \
             http://oidc:8999 smoke-api smoke-tenant
+          docker volume create "$OIDC_VOLUME" >/dev/null
+          # The daemon is remote, so it cannot bind-mount a path created in this
+          # job container. Stream the generated public files into its own volume.
+          tar -C "$SMOKE_DIR/oidc" -cf - . \
+            | docker run --rm -i --volume "$OIDC_VOLUME:/www" \
+                docker.io/library/busybox:1.37.0@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0 \
+                tar -C /www -xf -
           docker run -d --name "$IDP_CONTAINER" \
             --network "$NETWORK" --network-alias oidc \
-            --volume "$SMOKE_DIR/oidc:/www:ro" \
+            --volume "$OIDC_VOLUME:/www:ro" \
             docker.io/library/busybox:1.37.0@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0 \
             httpd -f -p 8999 -h /www
           idp_ready=false
@@ -270,4 +279,5 @@ jobs:
               "$(cat "$SMOKE_DIR/app-container")" \
               "$(cat "$SMOKE_DIR/idp-container")" || true
             docker network rm "$(cat "$SMOKE_DIR/network")" || true
+            docker volume rm "$(cat "$SMOKE_DIR/oidc-volume")" || true
           fi

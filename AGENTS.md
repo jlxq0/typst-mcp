@@ -95,6 +95,8 @@
   command preflights synchronized, and probe remote-daemon ports through the issued
   daemon address while publishing on a reachable interface. Gate disposable dependency
   readiness explicitly before the application can cache a legitimate startup failure.
+  A remote daemon also cannot bind-mount a job-container path; stream generated fixtures
+  into a daemon-owned volume and mount that volume read-only instead.
 
 - **Debug and release workers do not share a memory ceiling.** A five-image branded
   document fits the stripped 1 GiB production worker but exceeds that ceiling in a
