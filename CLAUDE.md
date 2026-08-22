@@ -4,18 +4,18 @@ Renders branded PDFs with Typst, over MCP (`/mcp`) and a REST API (`/api/v1`). R
 axum + rmcp. Typst is linked in-process; every compile runs in a one-shot subprocess.
 Specs in `.spec/`, ordered tasks in `Plan.md`, success criteria in `GOAL.md`.
 
-## Current versus target (2026-08-19)
+## Current versus target (2026-08-22)
 
 - Current production is `v0.1.8` at `https://typst-mcp.hanso.group`: the compile sandbox,
   Entra validation, same-origin DCR/OAuth bridge, tenant store, signed links, Hanso template,
   asset upload and seven MCP tools are real.
-- Current `main` now has path-only worker control frames, parent-owned RAII job workspaces,
+- The `v0.2.0` release candidate has path-only worker control frames, parent-owned RAII job workspaces,
   and a compile-only no-store `output=pdf` path; deployed `v0.1.8` predates those changes.
   The same branch also has one sanitized HTTP/MCP domain-error mapping and tenant-bound
   OIDC bearer downloads with signed-link outage fallback, the eighth text-only
   `typst_upload_template` tool, tenant-scoped ephemeral resolution, and REST tar/gzip
   template upload/deletion. Full compile/render arguments, asset roles/filters, and
-  RAII-workspace-scoped uploaded fonts are also implemented. KSC and Lenno are vendored
+  RAII-workspace-scoped uploaded fonts are also implemented. KSC, Lenno and Freudenberg are vendored
   from canonical OfficeMaster commits with schemas, safe fixtures and licensed brand fonts.
   Fifteen reviewed Google Fonts families are pinned with per-file checksums and licence
   texts; CI verifies the committed set offline.
@@ -27,12 +27,12 @@ Specs in `.spec/`, ordered tasks in `Plan.md`, success criteria in `GOAL.md`.
 - The live store is a 5 GiB ReadWriteOnce PVC on one replica with `Recreate` rollout. It
   survives pod replacement; TTL and LRU quotas govern content, and PVC capacity is the
   final disk bound. It is still a re-creatable cache, not durable business storage.
-- OfficeMaster has pushed Hanso, KSC and Lenno canonical libraries under
-  `brands/<brand>/typst/` on `feat/ksc-typst-template`. Freudenberg has a brief/master but
-  no completed Typst library. Preserve the unrelated
-  dirty Freudenberg worktree; never fold it into a template sync accidentally.
-- `scripts/sync-templates.sh` vendors Hanso, KSC and Lenno. Trusted CI checks all three
-  against their final brand-local OfficeMaster paths; adding Freudenberg remains target work.
+- OfficeMaster has canonical Hanso, KSC, Lenno and Freudenberg libraries under
+  `brands/<brand>/typst/`. Freudenberg is pinned to canonical commit `4c99d8c` and uses
+  Source Sans 3 plus Roboto Slab; TheSans remains prohibited and the logo notice remains
+  part of the template metadata.
+- `scripts/sync-templates.sh` vendors all four brands. Trusted CI checks each one against
+  its final brand-local OfficeMaster path.
 
 ## Known Pitfalls
 

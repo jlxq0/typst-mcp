@@ -10,7 +10,8 @@ Self-host the `/mcp` endpoint on your own domain.
 ## Status
 
 Production currently runs `v0.1.8` at `https://typst-mcp.hanso.group`. It ships one
-Hanso template and seven MCP tools. Current `main` ships Hanso, KSC and Lenno and exposes
+Hanso template and seven MCP tools. The `v0.2.0` release candidate ships Hanso, KSC,
+Lenno and Freudenberg and exposes
 the full eight-tool surface, including text-only `typst_upload_template`, and adds
 tenant-scoped ephemeral template resolution plus safe REST tar/gzip upload and deletion.
 It has also replaced bulk worker
@@ -19,8 +20,8 @@ mapping, added tenant-bound OIDC downloads, completed the MCP argument/filter su
 isolated uploaded fonts to one job. It also exposes bounded Prometheus metrics on a
 separate listener, optionally exports OTLP traces, and emits content-free audit envelopes.
 The exact linux/amd64 image now passes a ten-step local smoke suite, and CI builds/loads
-that image before any tag can be published. Freudenberg and the complete 10,000-compile
-soak remain completion work;
+that image before any tag can be published. The complete 10,000-compile soak remains
+release evidence;
 deployed `v0.1.8` predates all current-main checkpoints. See `Plan.md` for the checklist.
 
 ## Shape (RFC 9728 / MCP authorization)
@@ -67,7 +68,7 @@ cleartext `http` only on a loopback host (RFC 8252 §7.3). There is no
 | `typst_fonts` | Fonts available to compiles |
 | `typst_assets` | List uploaded assets for the caller |
 | `typst_link` | Mint a short-lived signed download URL |
-| `typst_upload_template` | Create a tenant-scoped text-only template (current `main`; not deployed `v0.1.8`) |
+| `typst_upload_template` | Create a tenant-scoped text-only template (release candidate; not deployed `v0.1.8`) |
 
 REST (`/api/v1`) is the same surface behind static API keys, for services that
 should not put a long-lived secret in a desktop MCP client.
@@ -115,6 +116,16 @@ Set the standard OpenTelemetry variables `OTEL_EXPORTER_OTLP_ENDPOINT` and, opti
 telemetry connection is created. Metrics and audit events contain bounded operational
 labels and counts only; source, input data, rendered content, diagnostics, and credentials
 are excluded by their APIs and regression tests.
+
+## Compile-process safety
+
+Typst permanently interns every distinct `FileId` in a 16-bit process-global table, while
+`comemo` also retains a process-global memo cache. Neither is safely reclaimable in a
+long-lived renderer. This server therefore starts one credential-free subprocess for each
+compile and discards the entire process afterward. Do not replace that boundary with
+in-process compilation or `FileId::unique()`. The design, limits, and threat controls are
+recorded in [`docs/security.md`](docs/security.md); distribution proof is recorded in
+[`docs/release-evidence.md`](docs/release-evidence.md).
 
 ## Entra app (click-path)
 
@@ -187,7 +198,7 @@ docker run --rm -p 3000:3000 \
   -e TYPST_MCP_OIDC_ISSUER=https://login.microsoftonline.com/<tenant-id>/v2.0 \
   -e TYPST_MCP_OIDC_AUDIENCE=api://typst-mcp,<api-app-guid> \
   -v typst-data:/data \
-  forge.oddie.app/jlxq0/typst-mcp:v0.1.8
+  forge.oddie.app/jlxq0/typst-mcp:v0.2.0
 ```
 
 The live service is a single replica with a 5 GiB ReadWriteOnce PVC and Recreate rollout
