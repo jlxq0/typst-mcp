@@ -5,6 +5,7 @@ on:
     branches: [main]
     tags: ["v*"]
   pull_request:
+  workflow_dispatch:
   schedule:
     - cron: "17 3 * * *"
 
@@ -212,7 +213,7 @@ jobs:
           HTTP_TIMEOUT=30 \
           scripts/smoke.sh
       - name: Nightly 10,000-filename soak
-        if: github.event_name == 'schedule'
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
         run: |
           set -euo pipefail
           SMOKE_DIR="$(cat "${RUNNER_TEMP}/typst-mcp-smoke-dir")"
