@@ -31,23 +31,23 @@ Templates and fonts are **baked** into the image when they are ours and reused (
 reviewed, permanent) and **uploaded** when they are one-off (a client's letterhead, a brand
 typeface, a template Claude just drafted). Uploads are TTL'd and per-caller.
 
-### Current implementation checkpoint (2026-08-19)
+### Current distribution checkpoint (2026-08-22)
 
-The deployed `v0.1.8` proves the core compile sandbox, Entra authentication, the
-same-origin DCR/OAuth bridge, tenant-scoped assets/outputs, signed links, Hanso rendering,
-and **seven** MCP tools. Current `main` has completed the eighth text-only
-`typst_upload_template` tool, tenant-scoped ephemeral resolution, safe REST tar/gzip upload
-and deletion, path-only worker I/O, true no-store direct PDF, shared sanitized HTTP/MCP
-errors, tenant-bound OIDC downloads, full compile/render arguments, asset role filters and
-per-job uploaded fonts without cross-job leakage. KSC and Lenno are now vendored from their
-canonical OfficeMaster sources with schemas, realistic fixtures, licensed fonts and
-embedded-family assertions.
-The 15-family distributable font set is pinned and licence-verified in CI. Observability,
-including a separate bounded Prometheus listener, optional OTLP traces and envelope-only
-audit events, is implemented with content-leak tests. The ten-step smoke and exact-image CI
-gate are implemented and locally verified; Freudenberg, a green Forge run, and the complete
-10,000-compile soak remain release evidence. None of the current-main additions is
-production evidence until released.
+`v0.2.0` is released and deployed by digest
+`sha256:67b2817da5232e8331fa4c3a43922a07f9ff4b62889568efa0e6531790635285`.
+Forge run 6634 built the exact linux/amd64 image, passed all ten smoke steps, published it,
+and completed teardown. Production is `1/1` Ready with zero restarts, the 5 GiB RWO volume
+is Bound, both ExternalSecrets are synced, and VictoriaMetrics reports the service up.
+
+Claude Desktop completed the production Entra OAuth flow, MCP initialization and
+`tools/list`. Its issued bearer then passed the complete live smoke suite, including MCP
+preview rendering, REST rendering and download, signed-link tamper rejection, tenant
+isolation, positioned diagnostics, timeout kill and recovery. A four-page Hanso document
+rendered by production passed visual inspection with no clipping, overlap or font fallback.
+The production `hanso30` Phoenix release also rendered a three-page PDF over the cluster
+Service, proving the internal REST path and its two-sided Cilium policy without using the
+edge. Forge run 6633 completed 10,000 distinct sequential compiles with zero restarts and
+flat retained memory. The release security scan has no surviving findings.
 
 ## 2. Why in-process Typst rather than shelling out
 
@@ -62,19 +62,19 @@ input, which turns the strongest regression test in the suite into one line.
 
 ## 3. Success criteria
 
-| # | Criterion | Verified by |
-|---|---|---|
-| G1 | Claude Desktop connects, authenticates via Entra, and lists the tools | manual once, then `tests/mcp_roundtrip.rs` |
-| G2 | "Use the Hanso template" produces a PDF the owner would send to a client | manual — the only test that matters |
-| G3 | Claude sees the preview, spots a layout problem, fixes it, re-renders | `tests/mcp_roundtrip.rs` asserts the image block |
-| G4 | Claude drafts a new template, uses it, and it can be promoted to git unchanged | `tests/templates.rs::upload_then_render_ephemeral` |
-| G5 | A heavy finite Typst program is killed at the deadline and the server stays healthy | `tests/sandbox.rs::a_runaway_compile_is_killed_and_the_service_survives` |
-| G6 | `#read("/etc/passwd")` returns "file not found", never content | `tests/sandbox.rs::no_filesystem_escape` |
-| G7 | One caller cannot see another's uploads or outputs, by id or URL | `tests/tenancy.rs` |
-| G8 | Disk cannot grow without bound under any caller behaviour | `tests/store.rs` + the PVC's capacity |
-| G9 | 10 000 sequential compiles leave the process healthy and flat on memory | `scripts/soak.sh` — see §5 |
-| G10 | A Phoenix app renders a PDF over `/api/v1` without touching the edge | smoke step against the cluster Service |
-| G11 | `fmt`, `clippy -D warnings`, `test`, `audit`, `deny` all clean; no image ships un-smoked | Forgejo CI |
+| # | Status | Criterion | Verified by |
+|---|---|---|---|
+| G1 | [x] | Claude Desktop connects, authenticates via Entra, and lists the tools | Production Claude MCP log: OAuth, `initialize`, `tools/list` |
+| G2 | [x] | "Use the Hanso template" produces a PDF the owner would send to a client | Four-page production PDF, manually inspected 2026-08-22 |
+| G3 | [x] | Claude sees the preview, spots a layout problem, fixes it, re-renders | `tests/mcp.rs` image-block coverage + live MCP preview smoke |
+| G4 | [x] | Claude drafts a new template, uses it, and it can be promoted to git unchanged | `tests/mcp.rs` ephemeral upload/render + archive byte round trip |
+| G5 | [x] | A heavy finite Typst program is killed at the deadline and the server stays healthy | Sandbox test + exact-image and live smoke step 10 |
+| G6 | [x] | `#read("/etc/passwd")` returns "file not found", never content | `tests/sandbox.rs::the_filesystem_is_not_reachable` |
+| G7 | [x] | One caller cannot see another's uploads or outputs, by id or URL | HTTP/MCP tenant-isolation tests + live smoke step 8 |
+| G8 | [x] | Disk cannot grow without bound under any caller behaviour | Store quota/LRU tests + Bound 5 GiB production PVC |
+| G9 | [x] | 10 000 sequential compiles leave the process healthy and flat on memory | `scripts/soak.sh`, Forge run 6633: zero restarts |
+| G10 | [x] | A Phoenix app renders a PDF over `/api/v1` without touching the edge | Production `hanso30` release rendered three pages via cluster Service |
+| G11 | [x] | `fmt`, `clippy -D warnings`, `test`, `audit`, `deny` all clean; no image ships un-smoked | Forge tag run 6634 + local 279-test gate + audit/deny |
 
 ## 4. Non-goals
 
