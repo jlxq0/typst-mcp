@@ -87,11 +87,13 @@
   bundle, template, store, link, upload, and download failures through `ApiError`; keep a
   live REST/MCP parity test so status, code, message, and diagnostics cannot drift again.
 
-- **Release scripts must use the commands present in the actual CI job image.** The OIDC
-  smoke helper used `xxd`, which was available on the development host but absent from
-  the Forge Ubuntu job container, so the exact image built successfully and the smoke
-  stack never started. Reuse `python3`, already required by the workflow, for hex
-  decoding and keep script command preflights synchronized with their implementation.
+- **Release scripts must match both the tools and network topology of the actual CI
+  runner.** The OIDC smoke helper used `xxd`, which was available on the development
+  host but absent from the Forge Ubuntu job container. After that was removed, the
+  remote DinD container started but its published port was probed on the job container's
+  unrelated loopback interface. Reuse `python3`, already required by the workflow, keep
+  command preflights synchronized, and probe remote-daemon ports through the issued
+  daemon address while publishing on a reachable interface.
 
 - **Debug and release workers do not share a memory ceiling.** A five-image branded
   document fits the stripped 1 GiB production worker but exceeds that ceiling in a

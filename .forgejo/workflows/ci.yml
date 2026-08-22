@@ -162,7 +162,9 @@ jobs:
           APP_CONTAINER="typst-mcp-smoke-${STACK_ID}"
           IDP_CONTAINER="typst-mcp-smoke-oidc-${STACK_ID}"
           SMOKE_PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
-          BASE="http://localhost:${SMOKE_PORT}"
+          # The Docker daemon is a remote DinD sidecar. Published ports belong
+          # to that host, not to this job container's loopback interface.
+          BASE="http://${DOCKER_IP}:${SMOKE_PORT}"
           SMOKE_DIR="${RUNNER_TEMP}/typst-mcp-smoke-${STACK_ID}"
           mkdir -p "$SMOKE_DIR"
           chmod 700 "$SMOKE_DIR"
@@ -188,7 +190,7 @@ jobs:
             httpd -f -p 8999 -h /www
           docker run -d --name "$APP_CONTAINER" \
             --network "$NETWORK" \
-            --publish "127.0.0.1:${SMOKE_PORT}:3000" \
+            --publish "0.0.0.0:${SMOKE_PORT}:3000" \
             --tmpfs /data:uid=65532,gid=65532,mode=0700,size=1g \
             --env TYPST_MCP_PUBLIC_URL="$BASE" \
             --env TYPST_MCP_API_KEYS="smoke:$(cat "$SMOKE_DIR/api-key"),smoke-other:$(cat "$SMOKE_DIR/other-api-key")" \
