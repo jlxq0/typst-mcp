@@ -83,6 +83,9 @@ jobs:
       image: ghcr.io/catthehacker/ubuntu:act-22.04
       volumes:
         - /certs/client:/certs/client:ro
+        # Public server certificate only: select its issued pod-IP SAN without
+        # exposing the DinD server private key to workflow code.
+        - /certs/server/cert.pem:/certs/server-cert.pem:ro
     needs: cargo
     # Build and smoke on every ref. A tag is only another name for the exact local
     # image that passed this job; no second build occurs after the smoke gate.
@@ -121,8 +124,11 @@ jobs:
           # reboot/DHCP, differs per repo/run). Slim image has no `ip`, so read
           # the default route from /proc/net/route via node (always present).
           GW="$(node -e 'const fs=require("fs");for(const l of fs.readFileSync("/proc/net/route","utf8").split("\n").slice(1)){const f=l.trim().split(/\s+/);if(f[1]==="00000000"){const h=f[2];console.log([h.slice(6,8),h.slice(4,6),h.slice(2,4),h.slice(0,2)].map(x=>parseInt(x,16)).join("."));break;}}')"
+          DOCKER_IP="$(openssl x509 -in /certs/server-cert.pem -noout -ext subjectAltName \
+            | tr ',' '\n' | sed -n 's/.*IP Address:\(10\.[0-9.]*\).*/\1/p' | head -1)"
+          test -n "$DOCKER_IP"
           export BUILDKIT_HOST="tcp://${GW}:1234"
-          export DOCKER_HOST="tcp://${GW}:2376"
+          export DOCKER_HOST="tcp://${DOCKER_IP}:2376"
           export DOCKER_CERT_PATH=/certs/client
           export DOCKER_TLS_VERIFY=1
           {
