@@ -93,7 +93,8 @@
   remote DinD container started but its published port was probed on the job container's
   unrelated loopback interface. Reuse `python3`, already required by the workflow, keep
   command preflights synchronized, and probe remote-daemon ports through the issued
-  daemon address while publishing on a reachable interface.
+  daemon address while publishing on a reachable interface. Gate disposable dependency
+  readiness explicitly before the application can cache a legitimate startup failure.
 
 - **Debug and release workers do not share a memory ceiling.** A five-image branded
   document fits the stripped 1 GiB production worker but exceeds that ceiling in a

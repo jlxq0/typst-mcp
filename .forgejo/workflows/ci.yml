@@ -190,6 +190,19 @@ jobs:
             --volume "$SMOKE_DIR/oidc:/www:ro" \
             docker.io/library/busybox:1.37.0@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0 \
             httpd -f -p 8999 -h /www
+          idp_ready=false
+          for _ in $(seq 1 20); do
+            if docker exec "$IDP_CONTAINER" wget -qO- \
+              http://127.0.0.1:8999/.well-known/openid-configuration >/dev/null; then
+              idp_ready=true
+              break
+            fi
+            sleep 0.25
+          done
+          [[ "$idp_ready" == true ]] || {
+            echo "disposable OIDC provider did not become ready" >&2
+            exit 1
+          }
           docker run -d --name "$APP_CONTAINER" \
             --network "$NETWORK" \
             --publish "0.0.0.0:${SMOKE_PORT}:3000" \
