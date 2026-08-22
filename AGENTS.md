@@ -65,8 +65,8 @@
   bundle, template, store, link, upload, and download failures through `ApiError`; keep a
   live REST/MCP parity test so status, code, message, and diagnostics cannot drift again.
 
-- **Release-sized render fixtures must use the release-tested worker ceiling.** A
-  five-image branded document fit the 1 GiB production worker but intermittently hit
-  the generic 512 MiB test default on Linux and surfaced only as a sanitized HTTP 500.
-  Keep heavyweight exact-image fixtures explicit about their worker memory limit; do
-  not raise the smaller default used by ordinary containment tests.
+- **Debug and release workers do not share a memory ceiling.** A five-image branded
+  document fits the stripped 1 GiB production worker but exceeds that ceiling in a
+  Linux debug integration-test binary and surfaces only as a sanitized HTTP 500. Give
+  heavyweight functional fixtures explicit debug headroom, keep exact-image smoke as
+  the production-memory gate, and do not raise the smaller ordinary-test default.
