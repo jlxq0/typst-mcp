@@ -794,7 +794,10 @@ async fn an_asset_can_be_uploaded_and_used_in_a_document() {
 
 #[tokio::test]
 async fn the_big_five_exercises_five_uploaded_jpegs_end_to_end() {
-    let server = TestServer::start().await;
+    // This is the release-sized branded fixture: exercise it with the same 1 GiB
+    // worker ceiling proven for the final linux/amd64 image. The generic 512 MiB
+    // unit-test default is deliberately smaller and can kill this worker on Linux.
+    let server = TestServer::start_with(&[("WORKER_MEMORY_BYTES", "1073741824")]).await;
     let mut asset_ids = Vec::new();
 
     for name in ["lion", "rhino", "elephant", "leopard", "buffalo"] {
