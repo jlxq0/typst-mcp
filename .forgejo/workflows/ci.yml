@@ -75,6 +75,13 @@ jobs:
   # so a rebuild reuses unchanged layers across runs.
   docker:
     runs-on: ubuntu-22.04
+    # The Fondue runner talks to its DinD sidecar over mutual TLS. Job
+    # containers live inside that daemon, so mount its client certificate set
+    # explicitly; `docker_host: automount` only covers Unix-socket runners.
+    container:
+      image: ghcr.io/catthehacker/ubuntu:act-22.04
+      volumes:
+        - /certs/client:/certs/client:ro
     needs: cargo
     # Build and smoke on every ref. A tag is only another name for the exact local
     # image that passed this job; no second build occurs after the smoke gate.
@@ -114,7 +121,16 @@ jobs:
           # the default route from /proc/net/route via node (always present).
           GW="$(node -e 'const fs=require("fs");for(const l of fs.readFileSync("/proc/net/route","utf8").split("\n").slice(1)){const f=l.trim().split(/\s+/);if(f[1]==="00000000"){const h=f[2];console.log([h.slice(6,8),h.slice(4,6),h.slice(2,4),h.slice(0,2)].map(x=>parseInt(x,16)).join("."));break;}}')"
           export BUILDKIT_HOST="tcp://${GW}:1234"
+          export DOCKER_HOST="tcp://${GW}:2376"
+          export DOCKER_CERT_PATH=/certs/client
+          export DOCKER_TLS_VERIFY=1
+          {
+            echo "DOCKER_HOST=${DOCKER_HOST}"
+            echo "DOCKER_CERT_PATH=${DOCKER_CERT_PATH}"
+            echo "DOCKER_TLS_VERIFY=${DOCKER_TLS_VERIFY}"
+          } >>"${GITHUB_ENV}"
           echo "buildkitd at ${BUILDKIT_HOST}"
+          docker info --format 'docker server {{.ServerVersion}}'
           CACHE_REF="forge.oddie.app/jlxq0/typst-mcp:buildcache"
           IMPORT_CACHE_ARG=()
           EXPORT_CACHE_ARG=()
