@@ -161,6 +161,8 @@ jobs:
           NETWORK="typst-mcp-smoke-${STACK_ID}"
           APP_CONTAINER="typst-mcp-smoke-${STACK_ID}"
           IDP_CONTAINER="typst-mcp-smoke-oidc-${STACK_ID}"
+          DOCKER_IP="${DOCKER_HOST#tcp://}"
+          DOCKER_IP="${DOCKER_IP%:2376}"
           SMOKE_PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
           # The Docker daemon is a remote DinD sidecar. Published ports belong
           # to that host, not to this job container's loopback interface.
