@@ -15,7 +15,7 @@ issuer=${3%/}
 audience=$4
 tenant_id=$5
 
-for command in jq openssl xxd; do
+for command in jq openssl python3; do
   command -v "$command" >/dev/null 2>&1 || {
     echo "missing required command: $command" >&2
     exit 2
@@ -43,7 +43,7 @@ base64url() {
   openssl base64 -A | tr '+/' '-_' | tr -d '='
 }
 
-modulus=$(printf '%s' "$modulus_hex" | xxd -r -p | base64url)
+modulus=$(printf '%s' "$modulus_hex" | python3 -c 'import sys; sys.stdout.buffer.write(bytes.fromhex(sys.stdin.read().strip()))' | base64url)
 now=$(date +%s)
 expires=$((now + 3600))
 
