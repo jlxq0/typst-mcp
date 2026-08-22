@@ -28,7 +28,11 @@ fn fonts() -> Arc<FontLibrary> {
 fn every_shipped_template_loads() {
     // A broken manifest must fail here, in CI, rather than on a caller's first request.
     let set = templates();
-    assert!(!set.is_empty(), "no templates found under templates/");
+    assert_eq!(
+        set.iter().count(),
+        4,
+        "the v1 image must ship all four brands"
+    );
     for template in set.iter() {
         assert!(!template.name().is_empty());
         assert!(
@@ -42,6 +46,27 @@ fn every_shipped_template_loads() {
             template.name()
         );
     }
+}
+
+#[test]
+fn the_freudenberg_constraints_travel_with_the_template() {
+    let set = templates();
+    let template = set
+        .get("freudenberg")
+        .expect("the Freudenberg template must be present");
+    let notice = template
+        .manifest
+        .notice
+        .as_deref()
+        .expect("external-brand constraints must not live only in prose docs");
+
+    assert!(
+        notice.contains("TheSans"),
+        "notice must name the prohibited font"
+    );
+    assert!(notice.contains("must never be embedded"));
+    assert!(notice.contains("trademark"));
+    assert!(notice.contains("usage rights"));
 }
 
 #[test]
@@ -202,6 +227,36 @@ fn the_lenno_template_embeds_both_brand_families() {
         );
     }
     assert!(out.pages >= 3, "expected Lenno cover, contents and body");
+}
+
+#[test]
+fn the_freudenberg_template_embeds_both_approved_families() {
+    let set = templates();
+    let template = set
+        .get("freudenberg")
+        .expect("the Freudenberg template must be present");
+    let assembled = template
+        .assemble(
+            template.example().expect("Freudenberg fixture"),
+            template.example_body(),
+            vec![],
+            8 * 1024 * 1024,
+        )
+        .expect("Freudenberg assembles");
+    let out = compile(&assembled.bundle, fonts(), &CompileOptions::default())
+        .unwrap_or_else(|e| panic!("Freudenberg compile failed: {e}\n{:#?}", e.diagnostics()));
+    let pdf = String::from_utf8_lossy(&out.pdf);
+
+    for family in ["SourceSans3", "RobotoSlab"] {
+        assert!(
+            pdf.contains(family),
+            "Freudenberg PDF has no embedded {family} subset"
+        );
+    }
+    assert!(
+        out.pages >= 3,
+        "expected Freudenberg cover, contents and body"
+    );
 }
 
 #[test]

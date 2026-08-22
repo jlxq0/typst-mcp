@@ -1,0 +1,78 @@
+# Freudenberg Group document.
+#
+# The Typst library is vendored byte-for-byte from OfficeMaster. Freudenberg is
+# an external brand, so the usage and font constraints travel with every listing.
+
+name = "freudenberg"
+kind = "wrapper"
+version = "1.0.0"
+description = """
+Freudenberg Group document — off-white ground, exact deep-blue/cyan hierarchy, \
+Source Sans 3 typography, Roboto Slab pull-quotes, uppercase display headings, \
+and full or simple corporate footers."""
+notice = """
+TheSans is Freudenberg's commercial corporate typeface and must never be embedded; \
+this template uses the reviewed open substitute Source Sans 3. The Freudenberg logo \
+and name are trademarks. Confirm usage rights before distributing externally."""
+entrypoint = "freudenberg.typ"
+wrapper_fn = "freudenberg-doc"
+
+[args.title]
+arg = "title"
+type = "str"
+
+[args.subtitle]
+arg = "subtitle"
+type = "str"
+
+[args.recipient]
+arg = "recipient"
+type = "str"
+
+[args.author]
+arg = "author"
+type = "str"
+
+[args.date]
+arg = "date"
+type = "date"
+
+[args.org]
+arg = "org"
+type = "str"
+
+[args.address]
+arg = "address"
+type = "strings"
+
+[args.phone]
+arg = "phone"
+type = "str"
+
+[args.email]
+arg = "email"
+type = "str"
+
+[args.web]
+arg = "web"
+type = "str"
+
+[args.legal]
+arg = "legal"
+type = "strings"
+
+[args.footer_style]
+arg = "footer-style"
+type = "str"
+
+[args.support]
+arg = "support"
+type = "str"
+
+[args.confidentiality]
+arg = "confidentiality"
+type = "str"
+
+[args.contents]
+arg = "contents"
+type = "bool"

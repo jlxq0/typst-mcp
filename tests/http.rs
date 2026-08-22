@@ -793,6 +793,52 @@ async fn an_asset_can_be_uploaded_and_used_in_a_document() {
 }
 
 #[tokio::test]
+async fn the_big_five_exercises_five_uploaded_jpegs_end_to_end() {
+    let server = TestServer::start().await;
+    let mut asset_ids = Vec::new();
+
+    for name in ["lion", "rhino", "elephant", "leopard", "buffalo"] {
+        let path = format!("figures/{name}.jpg");
+        let bytes = std::fs::read(repo(&format!("tests/fixtures/big-five/{path}")))
+            .unwrap_or_else(|error| panic!("read {path}: {error}"));
+        let response = server
+            .post_bytes(
+                &format!("/api/v1/assets?path={path}"),
+                Some(ALICE),
+                "image/jpeg",
+                bytes,
+            )
+            .await;
+        assert_eq!(response.status(), 200, "upload {path}");
+        let uploaded: serde_json::Value = response.json().await.expect("asset JSON");
+        asset_ids.push(uploaded["id"].as_str().expect("asset id").to_owned());
+    }
+
+    let body = std::fs::read_to_string(repo("tests/fixtures/big-five/body.typ"))
+        .expect("Big Five body fixture");
+    let response = server
+        .post_json(
+            "/api/v1/render",
+            Some(ALICE),
+            serde_json::json!({
+                "template": "hanso",
+                "data": {
+                    "title": "The Big Five Asset Test",
+                    "author": "typst-mcp",
+                    "date": "2026-08-22",
+                    "footer_style": "simple"
+                },
+                "body": body,
+                "assets": asset_ids,
+                "preview_pages": []
+            }),
+        )
+        .await;
+
+    assert_eq!(response.status(), 200, "{:?}", response.text().await);
+}
+
+#[tokio::test]
 async fn an_uploaded_font_is_available_to_one_job_only() {
     let server = TestServer::start_with(&[("FONT_DIRS", "")]).await;
     let font = std::fs::read(repo("fonts/Figtree-Regular.ttf")).expect("font fixture");

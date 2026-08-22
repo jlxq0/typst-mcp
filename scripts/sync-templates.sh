@@ -30,6 +30,7 @@ BRANDS=(
   "hanso:brands/hanso/typst/hanso.typ"
   "ksc:brands/ksc/typst/ksc.typ"
   "lenno:brands/lenno/typst/lenno.typ"
+  "freudenberg:brands/freudenberg/typst/freudenberg.typ"
 )
 
 fail=0
