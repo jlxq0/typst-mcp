@@ -29,6 +29,7 @@ pub mod principal;
 pub mod protocol;
 pub mod render;
 pub mod server;
+pub mod session;
 pub mod signing;
 pub mod spawn;
 pub mod store;

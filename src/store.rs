@@ -64,6 +64,10 @@ pub struct Limits {
     /// one busy caller evicts everyone else's data.
     pub max_tenant_bytes: u64,
     pub max_store_bytes: u64,
+    /// Metadata, directories and in-memory index records exist even for a zero-byte
+    /// payload, so byte quotas alone are not a complete storage bound.
+    pub max_tenant_entries: usize,
+    pub max_store_entries: usize,
 }
 
 impl Default for Limits {
@@ -74,6 +78,8 @@ impl Default for Limits {
             template_ttl: Duration::from_secs(7 * 24 * 60 * 60),
             max_tenant_bytes: 512 * 1024 * 1024,
             max_store_bytes: 2 * 1024 * 1024 * 1024,
+            max_tenant_entries: 10_000,
+            max_store_entries: 50_000,
         }
     }
 }
@@ -102,6 +108,8 @@ pub enum StoreError {
     BadId { kind: Kind, id: String },
     #[error("storing {size} bytes would exceed the {limit} byte limit for this tenant")]
     TenantFull { size: u64, limit: u64 },
+    #[error("storing another entry would exceed the {limit} entry limit for this tenant")]
+    TenantEntriesFull { limit: usize },
     #[error("io error at {path}: {source}")]
     Io { path: PathBuf, source: io::Error },
 }
@@ -191,6 +199,7 @@ struct Index {
     /// (tenant, kind, id) -> entry
     entries: HashMap<(TenantId, Kind, String), Entry>,
     per_tenant: HashMap<TenantId, u64>,
+    per_tenant_entries: HashMap<TenantId, usize>,
     total: u64,
 }
 
@@ -240,54 +249,70 @@ impl Store {
     ) -> Result<Entry, StoreError> {
         let id = validate_id(kind, id)?;
         let size = bytes.len() as u64;
+        let key = (tenant.clone(), kind, id.clone());
+        let dir = self.entry_dir(tenant, kind, &id);
+        let path = dir.join(safe_name(name));
 
-        // Check the tenant ceiling before writing. Global pressure is relieved by
-        // eviction; a single tenant over its own budget is simply refused, because
-        // evicting their own data to make room for their next upload is a loop.
+        // The quota decision, filesystem commit and index update are one serialized
+        // transaction. Releasing this lock between check and commit let concurrent
+        // uploads all observe the same tenant usage and overshoot the ceiling.
+        let mut index = self.lock();
+        let existing = index.entries.get(&key).cloned();
+        let is_new = existing.is_none();
+        let used = index.per_tenant.get(tenant).copied().unwrap_or(0);
+        if used.saturating_add(size) > self.limits.max_tenant_bytes {
+            return Err(StoreError::TenantFull {
+                size,
+                limit: self.limits.max_tenant_bytes,
+            });
+        }
+        if is_new
+            && index.per_tenant_entries.get(tenant).copied().unwrap_or(0)
+                >= self.limits.max_tenant_entries
         {
-            let index = self.lock();
-            let used = index.per_tenant.get(tenant).copied().unwrap_or(0);
-            if used + size > self.limits.max_tenant_bytes {
-                return Err(StoreError::TenantFull {
-                    size,
-                    limit: self.limits.max_tenant_bytes,
-                });
-            }
+            return Err(StoreError::TenantEntriesFull {
+                limit: self.limits.max_tenant_entries,
+            });
         }
 
-        let dir = self.entry_dir(tenant, kind, &id);
         create_dir(&dir)?;
-        let path = dir.join(safe_name(name));
+        if path.exists() {
+            return Err(StoreError::Io {
+                path,
+                source: io::Error::new(io::ErrorKind::AlreadyExists, "stored file already exists"),
+            });
+        }
         self.write_atomic(&path, bytes)?;
 
-        let now = now();
-        let entry = Entry {
-            id: id.clone(),
-            kind,
-            bytes: size,
-            created_at: now,
-            expires_at: now + self.limits.ttl(kind).as_secs(),
-            filename: meta.filename,
-            content_type: meta.content_type,
-            asset_role: meta.asset_role,
-        };
-        self.write_meta(&dir, &entry)?;
-
-        {
-            let mut index = self.lock();
-            let key = (tenant.clone(), kind, id);
-            // A second file under the same id adds to its total rather than replacing it.
-            if let Some(existing) = index.entries.get_mut(&key) {
-                existing.bytes += size;
-                existing.expires_at = entry.expires_at;
-            } else {
-                index.entries.insert(key, entry.clone());
+        let timestamp = now();
+        let entry = if let Some(mut existing) = existing {
+            existing.bytes = existing.bytes.saturating_add(size);
+            existing.expires_at = timestamp + self.limits.ttl(kind).as_secs();
+            existing
+        } else {
+            Entry {
+                id: id.clone(),
+                kind,
+                bytes: size,
+                created_at: timestamp,
+                expires_at: timestamp + self.limits.ttl(kind).as_secs(),
+                filename: meta.filename,
+                content_type: meta.content_type,
+                asset_role: meta.asset_role,
             }
-            *index.per_tenant.entry(tenant.clone()).or_insert(0) += size;
-            index.total += size;
+        };
+        if let Err(error) = self.write_meta(&dir, &entry) {
+            let _ = std::fs::remove_file(&path);
+            return Err(error);
         }
 
-        self.evict_if_over_budget()?;
+        index.entries.insert(key, entry.clone());
+        *index.per_tenant.entry(tenant.clone()).or_insert(0) += size;
+        index.total += size;
+        if is_new {
+            *index.per_tenant_entries.entry(tenant.clone()).or_insert(0) += 1;
+        }
+        self.evict_locked(&mut index);
         Ok(entry)
     }
 
@@ -464,37 +489,25 @@ impl Store {
     fn remove(&self, tenant: &TenantId, kind: Kind, id: &str) {
         let _ = std::fs::remove_dir_all(self.entry_dir(tenant, kind, id));
         let mut index = self.lock();
-        if let Some(entry) = index.entries.remove(&(tenant.clone(), kind, id.to_owned())) {
-            index.total = index.total.saturating_sub(entry.bytes);
-            if let Some(used) = index.per_tenant.get_mut(tenant) {
-                *used = used.saturating_sub(entry.bytes);
-            }
-        }
+        remove_from_index(&mut index, tenant, kind, id);
     }
 
     /// Evict oldest-first until the global ceiling is respected.
-    fn evict_if_over_budget(&self) -> Result<(), StoreError> {
-        loop {
-            let victim = {
-                let index = self.lock();
-                if index.total <= self.limits.max_store_bytes {
-                    return Ok(());
-                }
-                index
-                    .entries
-                    .iter()
-                    .min_by_key(|(_, e)| e.created_at)
-                    .map(|(key, _)| key.clone())
+    fn evict_locked(&self, index: &mut Index) {
+        while index.total > self.limits.max_store_bytes
+            || index.entries.len() > self.limits.max_store_entries
+        {
+            let Some((tenant, kind, id)) = index
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.created_at)
+                .map(|(key, _)| key.clone())
+            else {
+                break;
             };
-            match victim {
-                Some((tenant, kind, id)) => {
-                    self.remove(&tenant, kind, &id);
-                    self.quota_evictions.fetch_add(1, Ordering::Relaxed);
-                }
-                // Nothing left to evict; the accounting must be wrong rather than the
-                // disk genuinely full of nothing.
-                None => return Ok(()),
-            }
+            let _ = std::fs::remove_dir_all(self.entry_dir(&tenant, kind, &id));
+            remove_from_index(index, &tenant, kind, &id);
+            self.quota_evictions.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -525,19 +538,30 @@ impl Store {
                     let Some(id) = entry_dir.file_name().to_str().map(str::to_owned) else {
                         continue;
                     };
-                    let Ok(entry) = read_meta(&entry_dir.path()) else {
+                    let Ok(mut entry) = read_meta(&entry_dir.path()) else {
                         // No readable metadata means an interrupted write. Remove it
                         // rather than leave bytes the accounting cannot see.
                         let _ = std::fs::remove_dir_all(entry_dir.path());
                         continue;
                     };
+                    if entry.id != id || entry.kind != kind || validate_id(kind, &id).is_err() {
+                        let _ = std::fs::remove_dir_all(entry_dir.path());
+                        continue;
+                    }
+                    let Ok(payload_bytes) = payload_bytes(&entry_dir.path()) else {
+                        let _ = std::fs::remove_dir_all(entry_dir.path());
+                        continue;
+                    };
+                    entry.bytes = payload_bytes;
                     index.total += entry.bytes;
                     *index.per_tenant.entry(tenant.clone()).or_insert(0) += entry.bytes;
+                    *index.per_tenant_entries.entry(tenant.clone()).or_insert(0) += 1;
                     index.entries.insert((tenant.clone(), kind, id), entry);
                 }
             }
         }
 
+        self.evict_locked(&mut index);
         *self.lock() = index;
         Ok(())
     }
@@ -556,6 +580,41 @@ impl std::fmt::Debug for Store {
 fn read_meta(dir: &Path) -> Result<Entry, ()> {
     let bytes = std::fs::read(dir.join("meta.json")).map_err(|_| ())?;
     serde_json::from_slice(&bytes).map_err(|_| ())
+}
+
+fn payload_bytes(dir: &Path) -> Result<u64, ()> {
+    let entries = std::fs::read_dir(dir).map_err(|_| ())?;
+    let mut total = 0u64;
+    for entry in entries {
+        let entry = entry.map_err(|_| ())?;
+        if entry.file_name() == "meta.json" {
+            continue;
+        }
+        let metadata = entry.metadata().map_err(|_| ())?;
+        if !metadata.is_file() {
+            return Err(());
+        }
+        total = total.checked_add(metadata.len()).ok_or(())?;
+    }
+    Ok(total)
+}
+
+fn remove_from_index(index: &mut Index, tenant: &TenantId, kind: Kind, id: &str) {
+    if let Some(entry) = index.entries.remove(&(tenant.clone(), kind, id.to_owned())) {
+        index.total = index.total.saturating_sub(entry.bytes);
+        if let Some(used) = index.per_tenant.get_mut(tenant) {
+            *used = used.saturating_sub(entry.bytes);
+            if *used == 0 {
+                index.per_tenant.remove(tenant);
+            }
+        }
+        if let Some(entries) = index.per_tenant_entries.get_mut(tenant) {
+            *entries = entries.saturating_sub(1);
+            if *entries == 0 {
+                index.per_tenant_entries.remove(tenant);
+            }
+        }
+    }
 }
 
 fn create_dir(path: &Path) -> Result<(), StoreError> {
@@ -799,6 +858,58 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_writes_cannot_race_past_the_tenant_ceiling() {
+        use std::sync::{Arc, Barrier};
+
+        let limits = Limits {
+            max_tenant_bytes: 100,
+            ..Default::default()
+        };
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(Store::open(dir.path(), limits).expect("opens"));
+        let barrier = Arc::new(Barrier::new(3));
+        let mut threads = Vec::new();
+        for name in ["a.bin", "b.bin"] {
+            let store = Arc::clone(&store);
+            let barrier = Arc::clone(&barrier);
+            threads.push(std::thread::spawn(move || {
+                barrier.wait();
+                store.put(
+                    &tenant("alice"),
+                    Kind::Asset,
+                    name,
+                    &[0u8; 80],
+                    Meta::default(),
+                )
+            }));
+        }
+        barrier.wait();
+        let results: Vec<_> = threads
+            .into_iter()
+            .map(|thread| thread.join().expect("thread"))
+            .collect();
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(store.used_bytes(), 80);
+    }
+
+    #[test]
+    fn zero_byte_entries_are_bounded_by_count() {
+        let limits = Limits {
+            max_tenant_entries: 1,
+            ..Default::default()
+        };
+        let (_dir, store) = store(limits);
+        let alice = tenant("alice");
+        store
+            .put(&alice, Kind::Asset, "empty-a", b"", Meta::default())
+            .expect("first entry");
+        assert!(matches!(
+            store.put(&alice, Kind::Asset, "empty-b", b"", Meta::default()),
+            Err(StoreError::TenantEntriesFull { limit: 1 })
+        ));
+    }
+
+    #[test]
     fn one_tenants_ceiling_does_not_constrain_another() {
         let limits = Limits {
             max_tenant_bytes: 100,
@@ -918,6 +1029,35 @@ mod tests {
         assert_eq!(reopened.used_bytes(), 512);
         assert_eq!(reopened.tenant_bytes(&alice), 512);
         assert!(reopened.entry(&alice, Kind::Asset, &id).is_ok());
+    }
+
+    #[test]
+    fn restart_rebuild_counts_every_file_in_a_multi_file_entry() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let alice = tenant("alice");
+        let id = {
+            let store = Store::open(dir.path(), Limits::default()).expect("opens");
+            let entry = store
+                .put(&alice, Kind::Output, "doc.pdf", b"%PDF-", Meta::default())
+                .expect("pdf");
+            store
+                .put_with_id(
+                    &alice,
+                    Kind::Output,
+                    &entry.id,
+                    "page-1.png",
+                    b"\x89PNG",
+                    Meta::default(),
+                )
+                .expect("preview");
+            assert_eq!(store.used_bytes(), 9);
+            entry.id
+        };
+
+        let reopened = Store::open(dir.path(), Limits::default()).expect("reopens");
+        assert_eq!(reopened.used_bytes(), 9);
+        assert_eq!(reopened.tenant_bytes(&alice), 9);
+        assert_eq!(reopened.entry(&alice, Kind::Output, &id).unwrap().bytes, 9);
     }
 
     #[test]

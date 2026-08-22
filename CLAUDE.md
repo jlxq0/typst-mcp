@@ -207,6 +207,22 @@ Specs in `.spec/`, ordered tasks in `Plan.md`, success criteria in `GOAL.md`.
   `validation.leeway` explicitly so the tolerance is a decision rather than an
   inherited default, and remember it when writing a test for an expired token.
 
+- **OAuth bridge state and codes must be stateless, authenticated and bound.** A bounded
+  anonymous pending table is still a login-denial primitive. The bridge carries expiring
+  HMAC-authenticated state/code values and validates the registered client, exact redirect
+  URI and S256 verifier before an upstream token request.
+
+- **Parent-process parsers need their own limits.** Worker `RLIMIT_AS` does not cover tar
+  extension parsing, gzip expansion or JSON-schema diagnostic rendering. Bound decoded
+  archive bytes including metadata and cap both validation error count and message bytes.
+
+- **Storage quotas must serialize the decision and commit.** Concurrent uploads can all
+  pass a check made outside the write transaction. Entry counts are independent of byte
+  totals, and multi-file output metadata must preserve cumulative bytes across restart.
+
+- **rmcp's local session manager is not capacity-bounded.** Always wrap it with the
+  configured global admission cap; the library's idle timeout only cleans sessions later.
+
 ## Conventions
 
 - Untrusted paths are interpreted in `bundle.rs` and nowhere else. **Reject, never

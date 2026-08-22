@@ -15,7 +15,7 @@ use crate::config::Config;
 use crate::error::ApiError;
 use crate::metrics::Metrics;
 use crate::oauth_metadata::{authorization_server_metadata, protected_resource_metadata, register};
-use crate::oauth_proxy::{self, OAuthProxyState};
+use crate::oauth_proxy::{self, OAuthClientConfig, OAuthProxyState};
 use crate::principal::TenantId;
 use crate::render::{DOCUMENT_NAME, RenderRequest, RenderService};
 use crate::signing::SignatureError;
@@ -108,7 +108,11 @@ pub fn router(state: AppState) -> axum::Router {
                     &state.config.mcp_resource_url(),
                     &oidc.audience,
                     &oidc.scope,
-                    state.config.oauth_redirect_uris.clone(),
+                    OAuthClientConfig {
+                        client_id: state.config.dcr_client_id.clone().unwrap_or_default(),
+                        allowed_redirect_uris: state.config.oauth_redirect_uris.clone(),
+                        state_key: state.config.signing_secret.clone(),
+                    },
                 )),
         );
         app = app.merge(mcp_router(state));
@@ -125,7 +129,7 @@ pub fn router(state: AppState) -> axum::Router {
 /// concurrent sessions could then be handed each other's storage.
 fn mcp_router(state: AppState) -> axum::Router {
     use rmcp::transport::streamable_http_server::{
-        StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
+        StreamableHttpServerConfig, StreamableHttpService,
     };
 
     let render = Arc::clone(&state.render);
@@ -153,7 +157,7 @@ fn mcp_router(state: AppState) -> axum::Router {
                 Arc::clone(&config),
             ))
         },
-        LocalSessionManager::default().into(),
+        crate::session::CappedSessionManager::new(state.config.max_mcp_sessions).into(),
         mcp_config,
     );
 
@@ -519,6 +523,9 @@ async fn upload_asset(
     body: axum::body::Bytes,
 ) -> Response {
     let started = std::time::Instant::now();
+    if body.is_empty() {
+        return ApiError::bad_request("asset body must not be empty").into_response();
+    }
     // Normalised here, so a hostile path is refused before anything is written.
     let path = match crate::bundle::normalise_path(&query.path) {
         Ok(path) => path,

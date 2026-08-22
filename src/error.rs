@@ -178,7 +178,7 @@ impl From<StoreError> for ApiError {
             StoreError::NotFound { .. } | StoreError::BadId { .. } => {
                 Self::not_found(error.to_string())
             }
-            StoreError::TenantFull { .. } => Self::new(
+            StoreError::TenantFull { .. } | StoreError::TenantEntriesFull { .. } => Self::new(
                 StatusCode::INSUFFICIENT_STORAGE,
                 ErrorCode::QuotaExceeded,
                 error.to_string(),

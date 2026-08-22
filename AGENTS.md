@@ -7,11 +7,11 @@
   `RLIMIT_AS`. Keep duplicate-id, count, and cumulative metadata-size checks in a
   metadata-only preflight before the first `Store::get`.
 
-- **A capacity check must decide whether insertion is allowed.** The OAuth pending-state
-  table used to remove expired entries at its nominal cap and then insert regardless of
-  whether space was freed, so public `/authorize` requests grew it without bound and
-  made each later request scan an ever-larger table. After expiry cleanup, reject while
-  still at capacity; also bound every attacker-controlled value retained in the table.
+- **Do not retain anonymous OAuth authorization state in process memory.** Even a hard
+  cap lets public `/authorize` traffic monopolize every slot and deny real logins. Carry
+  redirect, client state and S256 challenge in an expiring HMAC-authenticated state value;
+  likewise broker the upstream code in an expiring authenticated value. Bind the client
+  id, redirect URI and verifier before forwarding any token request.
 
 - **Reject impossible JWT algorithms before provider I/O, and single-flight JWKS
   refreshes.** An unknown `kid` is attacker-controlled and must not trigger independent
@@ -29,6 +29,28 @@
   secrets, turning a configuration mistake into a weak working credential. Require the
   documented labelled form, enforce the 32-byte minimum at startup, reject duplicate
   labels, and ensure parse errors never retain or print a secret.
+
+- **API-key secrets must be unique, not only their labels.** Authentication maps a secret
+  to a tenant label. Allowing the same secret under two labels makes the later mapping win
+  and silently aliases callers into the wrong tenant. Reject duplicate secret digests at
+  startup without retaining or printing the secret.
+
+- **Storage quota checks and commits are one serialized transaction.** Concurrent writes
+  used to observe the same byte total and all pass the tenant limit. Hold the index lock
+  through check, atomic write, metadata update and accounting; persist cumulative bytes
+  for multi-file outputs, recompute them on restart, and cap entry counts because empty
+  payloads still consume metadata, directories and memory.
+
+- **Bound work done by archive and schema libraries before handing them attacker input.**
+  Tar GNU/PAX extension records and gzip expansion happen before member-size checks, and
+  collecting every JSON-schema error grows independently of the request body. Limit total
+  decompressed archive bytes including metadata, and cap both schema-error count and
+  rendered diagnostic bytes.
+
+- **In-memory MCP sessions need an admission ceiling.** rmcp's local manager otherwise
+  accepts sessions until the process runs out of memory. Serialize session creation,
+  reject at a configured global cap, retain rmcp's initialization and idle timeouts, and
+  release capacity on close.
 
 - **A subprocess sandbox inherits ambient credentials unless its environment is
   cleared explicitly.** Compile workers need only the framed job and executable path;

@@ -218,6 +218,8 @@ pub enum ApiKeyConfigError {
     SecretTooShort { position: usize, actual: usize },
     #[error("duplicate label {label:?}")]
     DuplicateLabel { label: String },
+    #[error("entry {position} reuses another entry's secret")]
+    DuplicateSecret { position: usize },
 }
 
 impl fmt::Debug for ApiKey {
@@ -245,12 +247,19 @@ impl ApiKeys {
         }
 
         let mut labels = HashSet::new();
+        let mut secrets = HashSet::new();
         let mut keys = Vec::new();
         for (index, entry) in value.split(',').enumerate() {
             let key = ApiKey::parse(entry, index + 1)?;
             if !labels.insert(key.label.clone()) {
                 return Err(ApiKeyConfigError::DuplicateLabel {
                     label: key.label.clone(),
+                });
+            }
+            let secret_digest: [u8; 32] = Sha256::digest(key.secret.as_bytes()).into();
+            if !secrets.insert(secret_digest) {
+                return Err(ApiKeyConfigError::DuplicateSecret {
+                    position: index + 1,
                 });
             }
             keys.push(key);
@@ -464,6 +473,14 @@ mod tests {
         assert!(keys.is_empty());
         assert!(keys.authenticate("").is_none());
         assert!(keys.authenticate("anything").is_none());
+    }
+
+    #[test]
+    fn duplicate_secrets_are_rejected_before_they_can_alias_tenants() {
+        let value = format!("alice:{KEY_ONE},bob:{KEY_ONE}");
+        let error = ApiKeys::parse(&value).expect_err("duplicate secret must fail closed");
+        assert_eq!(error, ApiKeyConfigError::DuplicateSecret { position: 2 });
+        assert!(!error.to_string().contains(KEY_ONE));
     }
 
     #[test]

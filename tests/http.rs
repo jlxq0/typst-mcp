@@ -793,6 +793,20 @@ async fn an_asset_can_be_uploaded_and_used_in_a_document() {
 }
 
 #[tokio::test]
+async fn empty_asset_upload_is_rejected() {
+    let server = TestServer::start().await;
+    let response = server
+        .post_bytes(
+            "/api/v1/assets?path=empty.bin",
+            Some(ALICE),
+            "application/octet-stream",
+            Vec::new(),
+        )
+        .await;
+    assert_eq!(response.status(), 400);
+}
+
+#[tokio::test]
 async fn the_big_five_exercises_five_uploaded_jpegs_end_to_end() {
     // This is the release-sized branded fixture. Linux debug binaries carry enough
     // allocator/debuginfo overhead to exceed the 1 GiB ceiling proven for the stripped
@@ -1318,7 +1332,7 @@ async fn native_client_callbacks_register_and_authorize() {
         let authorize = no_follow
             .get(server.url(&format!(
                 "/authorize?response_type=code&client_id=e20d1345-7e4e-4298-bf8d-6d4606b1ecb4\
-                 &redirect_uri={}&state=s&code_challenge=x&code_challenge_method=S256",
+                 &redirect_uri={}&state=s&code_challenge=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&code_challenge_method=S256",
                 urlencoding(uri)
             )))
             .send()

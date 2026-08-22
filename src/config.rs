@@ -90,6 +90,7 @@ pub struct Config {
     pub worker_exe: Option<PathBuf>,
     pub compile_timeout: Duration,
     pub max_concurrent_compiles: usize,
+    pub max_mcp_sessions: usize,
     pub worker_memory_bytes: u64,
 
     pub max_bundle_bytes: usize,
@@ -209,6 +210,7 @@ impl Config {
                 .map(PathBuf::from),
             compile_timeout: duration(get, "COMPILE_TIMEOUT", 20)?,
             max_concurrent_compiles: number(get, "MAX_CONCURRENT_COMPILES", default_concurrency())?,
+            max_mcp_sessions: number(get, "MAX_MCP_SESSIONS", 256)?,
             worker_memory_bytes: number(get, "WORKER_MEMORY_BYTES", 512 * 1024 * 1024)?,
 
             max_bundle_bytes: number(get, "MAX_BUNDLE_BYTES", 8 * 1024 * 1024)?,
@@ -222,6 +224,8 @@ impl Config {
                 template_ttl: duration(get, "TEMPLATE_TTL", 7 * 24 * 60 * 60)?,
                 max_tenant_bytes: number(get, "MAX_TENANT_BYTES", 512 * 1024 * 1024)?,
                 max_store_bytes: number(get, "MAX_STORE_BYTES", 2 * 1024 * 1024 * 1024)?,
+                max_tenant_entries: number(get, "MAX_TENANT_ENTRIES", 10_000)?,
+                max_store_entries: number(get, "MAX_STORE_ENTRIES", 50_000)?,
             },
         })
     }

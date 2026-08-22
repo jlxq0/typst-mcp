@@ -10,15 +10,16 @@
 //! not Logto's `/auth` + origin `resource`. We qualify a bare `render` scope and
 //! pass Claude's RFC 8707 `resource` through when it matches our MCP URL.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::body::Body;
 use axum::extract::{RawQuery, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Redirect, Response};
-use rand::RngCore;
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64URL;
+use serde::{Deserialize, Serialize};
 use tracing::warn;
 use url::Url;
 
@@ -27,12 +28,18 @@ use crate::oauth_redirect::is_allowed_redirect_uri;
 
 #[allow(clippy::duration_suboptimal_units)]
 const PENDING_TTL: Duration = Duration::from_secs(600);
-const PENDING_CAP: usize = 2048;
 const MAX_CLIENT_STATE_BYTES: usize = 4096;
+const MAX_UPSTREAM_CODE_BYTES: usize = 8192;
 
 #[derive(Clone)]
 pub struct OAuthProxyState {
     inner: Arc<Inner>,
+}
+
+pub struct OAuthClientConfig {
+    pub client_id: String,
+    pub allowed_redirect_uris: Vec<String>,
+    pub state_key: Vec<u8>,
 }
 
 struct Inner {
@@ -41,15 +48,26 @@ struct Inner {
     callback_url: String,
     mcp_resource: String,
     api_scope: String,
+    client_id: String,
     http: reqwest::Client,
     allowed_redirect_uris: Vec<String>,
-    pending: Mutex<HashMap<String, Pending>>,
+    state_key: Vec<u8>,
 }
 
+#[derive(Serialize, Deserialize)]
 struct Pending {
     client_redirect_uri: String,
     client_state: Option<String>,
-    created: Instant,
+    code_challenge: String,
+    issued_at: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PendingCode {
+    upstream_code: String,
+    client_redirect_uri: String,
+    code_challenge: String,
+    issued_at: u64,
 }
 
 impl OAuthProxyState {
@@ -59,7 +77,7 @@ impl OAuthProxyState {
         mcp_resource: &str,
         audience: &str,
         api_scope: &str,
-        allowed_redirect_uris: Vec<String>,
+        client: OAuthClientConfig,
     ) -> Self {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(10))
@@ -73,51 +91,120 @@ impl OAuthProxyState {
                 callback_url: format!("{}/oauth/callback", public_url.trim_end_matches('/')),
                 mcp_resource: mcp_resource.to_owned(),
                 api_scope: qualified_api_scope(audience, api_scope),
+                client_id: client.client_id,
                 http,
-                allowed_redirect_uris,
-                pending: Mutex::new(HashMap::new()),
+                allowed_redirect_uris: client.allowed_redirect_uris,
+                state_key: client.state_key,
             }),
         }
     }
 
-    /// Insert one pending authorization without ever exceeding the hard capacity.
-    fn insert(&self, state: String, pending: Pending) -> bool {
-        let Ok(mut g) = self.inner.pending.lock() else {
-            return false;
-        };
-        if g.len() >= PENDING_CAP {
-            let now = Instant::now();
-            g.retain(|_, p| now.duration_since(p.created) < PENDING_TTL);
-            if g.len() >= PENDING_CAP {
-                return false;
-            }
-        }
-        g.insert(state, pending);
-        true
+    fn encode_state(&self, pending: &Pending) -> Option<String> {
+        use hmac::Mac as _;
+        let payload = serde_json::to_vec(pending).ok()?;
+        let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(&self.inner.state_key).ok()?;
+        mac.update(b"oauth-state\0");
+        mac.update(&payload);
+        let signature = mac.finalize().into_bytes();
+        Some(format!(
+            "{}.{}",
+            BASE64URL.encode(payload),
+            BASE64URL.encode(signature)
+        ))
     }
 
-    fn take(&self, state: &str) -> Option<Pending> {
-        let p = {
-            let mut g = self.inner.pending.lock().ok()?;
-            g.remove(state)?
-        };
-        if Instant::now().duration_since(p.created) >= PENDING_TTL {
+    fn decode_state(&self, state: &str) -> Option<Pending> {
+        use hmac::Mac as _;
+        let (payload, signature) = state.split_once('.')?;
+        let payload = BASE64URL.decode(payload).ok()?;
+        let signature = BASE64URL.decode(signature).ok()?;
+        let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(&self.inner.state_key).ok()?;
+        mac.update(b"oauth-state\0");
+        mac.update(&payload);
+        mac.verify_slice(&signature).ok()?;
+        let pending: Pending = serde_json::from_slice(&payload).ok()?;
+        let now = now_unix();
+        if pending.issued_at > now.saturating_add(60)
+            || now.saturating_sub(pending.issued_at) >= PENDING_TTL.as_secs()
+        {
             return None;
         }
-        Some(p)
+        Some(pending)
+    }
+
+    fn encode_code(&self, pending: &PendingCode) -> Option<String> {
+        use hmac::Mac as _;
+        let payload = serde_json::to_vec(pending).ok()?;
+        let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(&self.inner.state_key).ok()?;
+        mac.update(b"oauth-code\0");
+        mac.update(&payload);
+        let signature = mac.finalize().into_bytes();
+        Some(format!(
+            "{}.{}",
+            BASE64URL.encode(payload),
+            BASE64URL.encode(signature)
+        ))
+    }
+
+    fn decode_code(&self, code: &str) -> Option<PendingCode> {
+        use hmac::Mac as _;
+        let (payload, signature) = code.split_once('.')?;
+        let payload = BASE64URL.decode(payload).ok()?;
+        let signature = BASE64URL.decode(signature).ok()?;
+        let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(&self.inner.state_key).ok()?;
+        mac.update(b"oauth-code\0");
+        mac.update(&payload);
+        mac.verify_slice(&signature).ok()?;
+        let pending: PendingCode = serde_json::from_slice(&payload).ok()?;
+        let now = now_unix();
+        if pending.issued_at > now.saturating_add(60)
+            || now.saturating_sub(pending.issued_at) >= PENDING_TTL.as_secs()
+        {
+            return None;
+        }
+        Some(pending)
     }
 }
 
-fn random_state() -> String {
-    let mut b = [0u8; 24];
-    rand::thread_rng().fill_bytes(&mut b);
-    hex::encode(b)
+fn now_unix() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 fn parse_pairs(q: &str) -> Vec<(String, String)> {
     url::form_urlencoded::parse(q.as_bytes())
         .into_owned()
         .collect()
+}
+
+fn exactly_one<'a>(pairs: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    let mut values = pairs
+        .iter()
+        .filter(|(key, _)| key == name)
+        .map(|(_, value)| value.as_str());
+    let value = values.next()?;
+    values.next().is_none().then_some(value)
+}
+
+fn valid_code_challenge(value: &str) -> bool {
+    value.len() == 43
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+fn valid_code_verifier(value: &str) -> bool {
+    (43..=128).contains(&value.len())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~'))
+}
+
+fn challenge_for(verifier: &str) -> String {
+    use sha2::Digest as _;
+    BASE64URL.encode(sha2::Sha256::digest(verifier.as_bytes()))
 }
 
 /// Qualify Entra v2 scopes: bare `render` becomes `api://typst-mcp/render`,
@@ -160,43 +247,58 @@ fn rewrite_resource(raw: &str, mcp_resource: &str) -> Option<String> {
 pub async fn authorize(State(st): State<OAuthProxyState>, RawQuery(q): RawQuery) -> Response {
     let mut pairs = parse_pairs(&q.unwrap_or_default());
 
-    let Some(client_redirect_uri) = pairs
-        .iter()
-        .find(|(k, _)| k == "redirect_uri")
-        .map(|(_, v)| v.clone())
-    else {
+    let Some(client_id) = exactly_one(&pairs, "client_id") else {
+        return (StatusCode::BAD_REQUEST, "missing or duplicate client_id\n").into_response();
+    };
+    if client_id != st.inner.client_id {
+        return (StatusCode::BAD_REQUEST, "unregistered client_id\n").into_response();
+    }
+    if exactly_one(&pairs, "response_type") != Some("code") {
+        return (StatusCode::BAD_REQUEST, "response_type must be code\n").into_response();
+    }
+    let Some(client_redirect_uri) = exactly_one(&pairs, "redirect_uri").map(str::to_owned) else {
         return (StatusCode::BAD_REQUEST, "missing redirect_uri\n").into_response();
     };
     if !is_allowed_redirect_uri(&st.inner.allowed_redirect_uris, &client_redirect_uri) {
         return (StatusCode::BAD_REQUEST, "unregistered redirect_uri\n").into_response();
     }
 
-    let client_state = pairs
-        .iter()
-        .find(|(k, _)| k == "state")
-        .map(|(_, v)| v.clone());
+    let client_state = match pairs.iter().filter(|(key, _)| key == "state").count() {
+        0 => None,
+        1 => exactly_one(&pairs, "state").map(str::to_owned),
+        _ => return (StatusCode::BAD_REQUEST, "duplicate state\n").into_response(),
+    };
     if client_state
         .as_ref()
         .is_some_and(|state| state.len() > MAX_CLIENT_STATE_BYTES)
     {
         return (StatusCode::BAD_REQUEST, "state is too long\n").into_response();
     }
-
-    let proxy_state = random_state();
-    if !st.insert(
-        proxy_state.clone(),
-        Pending {
-            client_redirect_uri,
-            client_state,
-            created: Instant::now(),
-        },
-    ) {
+    let Some(code_challenge) = exactly_one(&pairs, "code_challenge").map(str::to_owned) else {
         return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "too many pending authorizations; retry later\n",
+            StatusCode::BAD_REQUEST,
+            "missing or duplicate code_challenge\n",
+        )
+            .into_response();
+    };
+    if !valid_code_challenge(&code_challenge)
+        || exactly_one(&pairs, "code_challenge_method") != Some("S256")
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            "code_challenge_method must be S256 with a valid challenge\n",
         )
             .into_response();
     }
+
+    let Some(proxy_state) = st.encode_state(&Pending {
+        client_redirect_uri,
+        client_state,
+        code_challenge,
+        issued_at: now_unix(),
+    }) else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
 
     let mut saw_state = false;
     let mut saw_scope = false;
@@ -240,12 +342,12 @@ pub async fn authorize(State(st): State<OAuthProxyState>, RawQuery(q): RawQuery)
 }
 
 pub async fn callback(State(st): State<OAuthProxyState>, RawQuery(q): RawQuery) -> Response {
-    let pairs: HashMap<String, String> = parse_pairs(&q.unwrap_or_default()).into_iter().collect();
+    let pairs = parse_pairs(&q.unwrap_or_default());
 
-    let Some(state) = pairs.get("state") else {
-        return (StatusCode::BAD_REQUEST, "missing state\n").into_response();
+    let Some(state) = exactly_one(&pairs, "state") else {
+        return (StatusCode::BAD_REQUEST, "missing or duplicate state\n").into_response();
     };
-    let Some(pending) = st.take(state) else {
+    let Some(pending) = st.decode_state(state) else {
         return (StatusCode::BAD_REQUEST, "unknown or expired state\n").into_response();
     };
     let Ok(mut url) = Url::parse(&pending.client_redirect_uri) else {
@@ -254,13 +356,25 @@ pub async fn callback(State(st): State<OAuthProxyState>, RawQuery(q): RawQuery) 
 
     {
         let mut qp = url.query_pairs_mut();
-        if let Some(code) = pairs.get("code") {
-            qp.append_pair("code", code);
+        if let Some(code) = exactly_one(&pairs, "code") {
+            if code.len() > MAX_UPSTREAM_CODE_BYTES {
+                return (StatusCode::BAD_REQUEST, "authorization code is too long\n")
+                    .into_response();
+            }
+            let Some(proxy_code) = st.encode_code(&PendingCode {
+                upstream_code: code.to_owned(),
+                client_redirect_uri: pending.client_redirect_uri,
+                code_challenge: pending.code_challenge,
+                issued_at: now_unix(),
+            }) else {
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            };
+            qp.append_pair("code", &proxy_code);
         }
-        if let Some(err) = pairs.get("error") {
+        if let Some(err) = exactly_one(&pairs, "error") {
             qp.append_pair("error", err);
         }
-        if let Some(desc) = pairs.get("error_description") {
+        if let Some(desc) = exactly_one(&pairs, "error_description") {
             qp.append_pair("error_description", desc);
         }
         if let Some(cs) = &pending.client_state {
@@ -272,19 +386,77 @@ pub async fn callback(State(st): State<OAuthProxyState>, RawQuery(q): RawQuery) 
 
 pub async fn token(State(st): State<OAuthProxyState>, body: String) -> Response {
     let mut pairs = parse_pairs(&body);
-    let is_authorization_code = pairs
-        .iter()
-        .any(|(k, v)| k == "grant_type" && v == "authorization_code");
+    let Some(client_id) = exactly_one(&pairs, "client_id") else {
+        return (StatusCode::BAD_REQUEST, "missing or duplicate client_id\n").into_response();
+    };
+    if client_id != st.inner.client_id {
+        return (StatusCode::BAD_REQUEST, "unregistered client_id\n").into_response();
+    }
+    let Some(grant_type) = exactly_one(&pairs, "grant_type") else {
+        return (StatusCode::BAD_REQUEST, "missing or duplicate grant_type\n").into_response();
+    };
+    if !matches!(grant_type, "authorization_code" | "refresh_token") {
+        return (StatusCode::BAD_REQUEST, "unsupported grant_type\n").into_response();
+    }
+    let is_authorization_code = grant_type == "authorization_code";
+    let authorization = if is_authorization_code {
+        let Some(redirect_uri) = exactly_one(&pairs, "redirect_uri").map(str::to_owned) else {
+            return (
+                StatusCode::BAD_REQUEST,
+                "missing or duplicate redirect_uri\n",
+            )
+                .into_response();
+        };
+        if !is_allowed_redirect_uri(&st.inner.allowed_redirect_uris, &redirect_uri) {
+            return (StatusCode::BAD_REQUEST, "unregistered redirect_uri\n").into_response();
+        }
+        let Some(code) = exactly_one(&pairs, "code").map(str::to_owned) else {
+            return (StatusCode::BAD_REQUEST, "missing or duplicate code\n").into_response();
+        };
+        let Some(verifier) = exactly_one(&pairs, "code_verifier").map(str::to_owned) else {
+            return (
+                StatusCode::BAD_REQUEST,
+                "missing or duplicate code_verifier\n",
+            )
+                .into_response();
+        };
+        if !valid_code_verifier(&verifier) {
+            return (StatusCode::BAD_REQUEST, "invalid code_verifier\n").into_response();
+        }
+        let Some(pending) = st.decode_code(&code) else {
+            return (
+                StatusCode::BAD_REQUEST,
+                "unknown or expired authorization code\n",
+            )
+                .into_response();
+        };
+        use subtle::ConstantTimeEq as _;
+        let challenge_matches: bool = challenge_for(&verifier)
+            .as_bytes()
+            .ct_eq(pending.code_challenge.as_bytes())
+            .into();
+        if pending.client_redirect_uri != redirect_uri || !challenge_matches {
+            return (
+                StatusCode::BAD_REQUEST,
+                "authorization code binding mismatch\n",
+            )
+                .into_response();
+        }
+        Some((pending.upstream_code, redirect_uri))
+    } else {
+        None
+    };
     let mut saw_redirect_uri = false;
     let mut saw_scope = false;
     let mut drop_resource = false;
     for (k, v) in &mut pairs {
         if k == "redirect_uri" {
-            if !is_allowed_redirect_uri(&st.inner.allowed_redirect_uris, v) {
-                return (StatusCode::BAD_REQUEST, "unregistered redirect_uri\n").into_response();
-            }
             saw_redirect_uri = true;
             v.clone_from(&st.inner.callback_url);
+        } else if k == "code"
+            && let Some((upstream_code, _)) = &authorization
+        {
+            v.clone_from(upstream_code);
         } else if k == "scope" {
             *v = rewrite_scope(v, &st.inner.api_scope);
             saw_scope = true;
@@ -299,9 +471,7 @@ pub async fn token(State(st): State<OAuthProxyState>, body: String) -> Response 
     if drop_resource {
         pairs.retain(|(k, _)| k != "resource");
     }
-    if is_authorization_code && !saw_redirect_uri {
-        return (StatusCode::BAD_REQUEST, "missing redirect_uri\n").into_response();
-    }
+    debug_assert!(!is_authorization_code || saw_redirect_uri);
     if !saw_scope && !is_authorization_code {
         pairs.push(("scope".to_owned(), rewrite_scope("", &st.inner.api_scope)));
     }
@@ -345,6 +515,19 @@ pub async fn token(State(st): State<OAuthProxyState>, body: String) -> Response 
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+
+    const VERIFIER: &str = "test-verifier-abcdefghijklmnopqrstuvwxyz-0123456789";
+
+    fn authorize_query(redirect_uri: &str) -> String {
+        url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("response_type", "code")
+            .append_pair("client_id", "test-client")
+            .append_pair("redirect_uri", redirect_uri)
+            .append_pair("code_challenge", &challenge_for(VERIFIER))
+            .append_pair("code_challenge_method", "S256")
+            .finish()
+    }
 
     fn state() -> OAuthProxyState {
         OAuthProxyState::new(
@@ -353,15 +536,20 @@ mod tests {
             "https://typst-mcp.example.test/mcp",
             "api://typst-mcp",
             "render",
-            vec!["https://claude.ai/api/mcp/auth_callback".to_owned()],
+            OAuthClientConfig {
+                client_id: "test-client".to_owned(),
+                allowed_redirect_uris: vec!["https://claude.ai/api/mcp/auth_callback".to_owned()],
+                state_key: b"test signing key with at least thirty two bytes".to_vec(),
+            },
         )
     }
 
-    fn pending(created: Instant) -> Pending {
+    fn pending(issued_at: u64) -> Pending {
         Pending {
             client_redirect_uri: "https://claude.ai/api/mcp/auth_callback".to_owned(),
             client_state: Some("client-state".to_owned()),
-            created,
+            code_challenge: challenge_for(VERIFIER),
+            issued_at,
         }
     }
 
@@ -413,38 +601,46 @@ mod tests {
     async fn authorize_rejects_unregistered_redirect_uri() {
         let response = authorize(
             State(state()),
-            RawQuery(Some(
-                "client_id=abc&redirect_uri=https%3A%2F%2Fattacker.example%2Fcb&response_type=code"
-                    .to_owned(),
-            )),
+            RawQuery(Some(authorize_query("https://attacker.example/cb"))),
         )
         .await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
-    #[test]
-    fn pending_table_never_exceeds_its_cap() {
-        let st = state();
-        for n in 0..PENDING_CAP {
-            assert!(st.insert(format!("proxy-state-{n}"), pending(Instant::now())));
+    #[tokio::test]
+    async fn authorize_requires_the_registered_client_and_s256_pkce() {
+        for query in [
+            "response_type=code&redirect_uri=https%3A%2F%2Fclaude.ai%2Fapi%2Fmcp%2Fauth_callback&code_challenge=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&code_challenge_method=S256",
+            "response_type=code&client_id=wrong&redirect_uri=https%3A%2F%2Fclaude.ai%2Fapi%2Fmcp%2Fauth_callback&code_challenge=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&code_challenge_method=S256",
+            "response_type=code&client_id=test-client&redirect_uri=https%3A%2F%2Fclaude.ai%2Fapi%2Fmcp%2Fauth_callback&code_challenge=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&code_challenge_method=plain",
+        ] {
+            let response = authorize(State(state()), RawQuery(Some(query.to_owned()))).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{query}");
         }
-        assert!(!st.insert("overflow".to_owned(), pending(Instant::now())));
-
-        assert_eq!(st.inner.pending.lock().unwrap().len(), PENDING_CAP);
     }
 
     #[test]
-    fn pending_table_reclaims_expired_entries_at_capacity() {
+    fn stateless_pending_authorization_round_trips_and_rejects_tampering() {
         let st = state();
-        let expired = Instant::now() - PENDING_TTL;
-        for n in 0..PENDING_CAP {
-            assert!(st.insert(format!("expired-{n}"), pending(expired)));
-        }
+        let encoded = st.encode_state(&pending(now_unix())).expect("encodes");
+        let decoded = st.decode_state(&encoded).expect("decodes");
+        assert_eq!(decoded.client_state.as_deref(), Some("client-state"));
 
-        assert!(st.insert("fresh".to_owned(), pending(Instant::now())));
-        let g = st.inner.pending.lock().unwrap();
-        assert_eq!(g.len(), 1);
-        assert!(g.contains_key("fresh"));
+        let mut tampered = encoded.into_bytes();
+        tampered[0] = if tampered[0] == b'A' { b'B' } else { b'A' };
+        assert!(
+            st.decode_state(std::str::from_utf8(&tampered).unwrap())
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn stateless_pending_authorization_expires() {
+        let st = state();
+        let encoded = st
+            .encode_state(&pending(now_unix() - PENDING_TTL.as_secs()))
+            .expect("encodes");
+        assert!(st.decode_state(&encoded).is_none());
     }
 
     #[tokio::test]
@@ -452,47 +648,29 @@ mod tests {
         let st = state();
         let oversized = "x".repeat(4097);
         let query = url::form_urlencoded::Serializer::new(String::new())
-            .append_pair("client_id", "abc")
+            .append_pair("client_id", "test-client")
             .append_pair("redirect_uri", "https://claude.ai/api/mcp/auth_callback")
             .append_pair("response_type", "code")
+            .append_pair("code_challenge", &challenge_for(VERIFIER))
+            .append_pair("code_challenge_method", "S256")
             .append_pair("state", &oversized)
             .finish();
         let response = authorize(State(st.clone()), RawQuery(Some(query))).await;
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        assert!(st.inner.pending.lock().unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn authorize_returns_unavailable_when_pending_table_is_full() {
-        let st = state();
-        for n in 0..PENDING_CAP {
-            assert!(st.insert(format!("proxy-state-{n}"), pending(Instant::now())));
-        }
-        let response = authorize(
-            State(st.clone()),
-            RawQuery(Some(
-                "client_id=abc&redirect_uri=https%3A%2F%2Fclaude.ai%2Fapi%2Fmcp%2Fauth_callback&response_type=code"
-                    .to_owned(),
-            )),
-        )
-        .await;
-
-        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(st.inner.pending.lock().unwrap().len(), PENDING_CAP);
     }
 
     #[tokio::test]
     async fn authorize_forwards_to_entra_with_our_callback() {
         let st = state();
-        let response = authorize(
-            State(st.clone()),
-            RawQuery(Some(
-                "client_id=abc&redirect_uri=https%3A%2F%2Fclaude.ai%2Fapi%2Fmcp%2Fauth_callback&state=client-state&scope=render&resource=https%3A%2F%2Ftypst-mcp.example.test%2Fmcp"
-                    .to_owned(),
-            )),
-        )
-        .await;
+        let query = url::form_urlencoded::Serializer::new(authorize_query(
+            "https://claude.ai/api/mcp/auth_callback",
+        ))
+        .append_pair("state", "client-state")
+        .append_pair("scope", "render")
+        .append_pair("resource", "https://typst-mcp.example.test/mcp")
+        .finish();
+        let response = authorize(State(st.clone()), RawQuery(Some(query))).await;
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
         let location = response
             .headers()
@@ -520,20 +698,53 @@ mod tests {
             )
         );
         let proxy_state = params.get("state").expect("proxy state");
-        let pending = st.take(proxy_state).expect("pending state");
+        let pending = st.decode_state(proxy_state).expect("pending state");
         assert_eq!(
             pending.client_redirect_uri,
             "https://claude.ai/api/mcp/auth_callback"
         );
         assert_eq!(pending.client_state.as_deref(), Some("client-state"));
+        assert_eq!(pending.code_challenge, challenge_for(VERIFIER));
+    }
+
+    #[tokio::test]
+    async fn callback_brokers_the_upstream_code_and_binds_it_to_pkce() {
+        let st = state();
+        let proxy_state = st.encode_state(&pending(now_unix())).expect("proxy state");
+        let query = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("state", &proxy_state)
+            .append_pair("code", "entra-secret-code")
+            .finish();
+        let response = callback(State(st.clone()), RawQuery(Some(query))).await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let location = response.headers()[header::LOCATION].to_str().unwrap();
+        assert!(!location.contains("entra-secret-code"));
+        let redirect = Url::parse(location).unwrap();
+        let values: HashMap<String, String> = redirect.query_pairs().into_owned().collect();
+        assert_eq!(
+            values.get("state").map(String::as_str),
+            Some("client-state")
+        );
+        let code = values.get("code").expect("brokered code");
+        let pending = st.decode_code(code).expect("valid brokered code");
+        assert_eq!(pending.upstream_code, "entra-secret-code");
+        assert_eq!(pending.code_challenge, challenge_for(VERIFIER));
+
+        let mut tampered = code.as_bytes().to_vec();
+        tampered[0] = if tampered[0] == b'A' { b'B' } else { b'A' };
+        assert!(
+            st.decode_code(std::str::from_utf8(&tampered).unwrap())
+                .is_none()
+        );
     }
 
     #[tokio::test]
     async fn token_rejects_unregistered_authorization_code_redirect_uri() {
         let response = token(
             State(state()),
-            "grant_type=authorization_code&code=abc&redirect_uri=https%3A%2F%2Fattacker.example%2Fcb&code_verifier=v"
-                .to_owned(),
+            format!(
+                "grant_type=authorization_code&client_id=test-client&code=abc&redirect_uri=https%3A%2F%2Fattacker.example%2Fcb&code_verifier={VERIFIER}"
+            ),
         )
         .await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);

@@ -12,6 +12,7 @@
 //! [`crate::typst_value`], never string interpolation.
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 
@@ -36,6 +37,67 @@ pub const STORED_ARCHIVE: &str = "template.tar";
 
 /// Prefix reserved for generated files.
 const RESERVED_PREFIX: &str = "__";
+const MAX_ARCHIVE_OVERHEAD_BYTES: usize = 256 * 1024;
+const MAX_SCHEMA_ERRORS: usize = 16;
+const MAX_SCHEMA_DIAGNOSTIC_BYTES: usize = 8 * 1024;
+
+struct BoundedReader<R> {
+    inner: R,
+    remaining: usize,
+}
+
+impl<R: Read> Read for BoundedReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        if self.remaining == 0 {
+            let mut probe = [0u8; 1];
+            return match self.inner.read(&mut probe)? {
+                0 => Ok(0),
+                _ => Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "decompressed archive exceeds its metadata budget",
+                )),
+            };
+        }
+        let limit = buf.len().min(self.remaining);
+        let read = self.inner.read(&mut buf[..limit])?;
+        self.remaining -= read;
+        Ok(read)
+    }
+}
+
+struct BoundedMessage {
+    value: String,
+    remaining: usize,
+}
+
+impl BoundedMessage {
+    fn new(limit: usize) -> Self {
+        Self {
+            value: String::new(),
+            remaining: limit,
+        }
+    }
+}
+
+impl std::fmt::Write for BoundedMessage {
+    fn write_str(&mut self, value: &str) -> std::fmt::Result {
+        if value.len() <= self.remaining {
+            self.value.push_str(value);
+            self.remaining -= value.len();
+            return Ok(());
+        }
+        let mut end = self.remaining.min(value.len());
+        while !value.is_char_boundary(end) {
+            end -= 1;
+        }
+        self.value.push_str(&value[..end]);
+        self.remaining = 0;
+        Err(std::fmt::Error)
+    }
+}
 
 /// Maps generated files back to what the caller actually wrote.
 ///
@@ -426,10 +488,14 @@ impl Template {
 
     /// Decode a tar or gzip-compressed tar without extracting any member to disk.
     pub fn from_archive(bytes: &[u8], max_bytes: usize) -> Result<Self, TemplateError> {
-        let reader: Box<dyn Read> = if bytes.starts_with(&[0x1f, 0x8b]) {
+        let decoded: Box<dyn Read> = if bytes.starts_with(&[0x1f, 0x8b]) {
             Box::new(flate2::read::GzDecoder::new(Cursor::new(bytes)))
         } else {
             Box::new(Cursor::new(bytes))
+        };
+        let reader = BoundedReader {
+            inner: decoded,
+            remaining: max_bytes.saturating_add(MAX_ARCHIVE_OVERHEAD_BYTES),
         };
         let mut archive = tar::Archive::new(reader);
         let entries = archive
@@ -531,22 +597,32 @@ impl Template {
                 path: PathBuf::from("schema.json"),
                 message: e.to_string(),
             })?;
-        let problems: Vec<String> = validator
-            .iter_errors(data)
-            .map(|e| {
-                let at = e.instance_path().to_string();
-                if at.is_empty() {
-                    e.to_string()
-                } else {
-                    format!("{at}: {e}")
-                }
-            })
-            .collect();
-        if problems.is_empty() {
-            Ok(())
-        } else {
-            Err(TemplateError::SchemaViolation(problems.join("; ")))
+        let mut errors = validator.iter_errors(data);
+        let Some(first) = errors.next() else {
+            return Ok(());
+        };
+        let mut message = BoundedMessage::new(MAX_SCHEMA_DIAGNOSTIC_BYTES);
+        for (index, error) in std::iter::once(first)
+            .chain(errors.by_ref().take(MAX_SCHEMA_ERRORS - 1))
+            .enumerate()
+        {
+            if index > 0 && message.write_str("; ").is_err() {
+                break;
+            }
+            let path = error.instance_path();
+            if path.as_str().is_empty() {
+                let _ = write!(message, "{error}");
+            } else {
+                let _ = write!(message, "{path}: {error}");
+            }
+            if message.remaining == 0 {
+                break;
+            }
         }
+        if errors.next().is_some() && message.remaining > 0 {
+            let _ = message.write_str("; additional validation errors omitted");
+        }
+        Err(TemplateError::SchemaViolation(message.value))
     }
 
     /// Build a compilable bundle from caller data and, for wrapper templates, a body.
@@ -1203,6 +1279,29 @@ type = "strings"
     }
 
     #[test]
+    fn schema_diagnostics_are_bounded_for_many_failures() {
+        let dir = tempfile::tempdir().unwrap();
+        wrapper_template(dir.path());
+        std::fs::write(
+            dir.path().join("schema.json"),
+            r#"{"type":"array","items":{"type":"integer"}}"#,
+        )
+        .unwrap();
+        let template = Template::load(dir.path()).expect("loads");
+        let data = serde_json::Value::Array(
+            (0..10_000)
+                .map(|index| serde_json::Value::String(format!("invalid-{index}")))
+                .collect(),
+        );
+        let err = template.validate(&data).expect_err("invalid");
+        let TemplateError::SchemaViolation(message) = err else {
+            panic!("wrong error: {err:?}");
+        };
+        assert!(message.len() <= MAX_SCHEMA_DIAGNOSTIC_BYTES);
+        assert!(message.matches("is not of type").count() <= MAX_SCHEMA_ERRORS);
+    }
+
+    #[test]
     fn wrapper_templates_require_a_body_and_data_templates_refuse_one() {
         let (_dir, template) = load_demo();
         let err = template
@@ -1368,6 +1467,29 @@ type = "strings"
             Template::from_archive(&bytes, 1024),
             Err(TemplateError::NonFileMember { .. })
         ));
+    }
+
+    #[test]
+    fn compressed_archive_extension_metadata_has_a_decompressed_ceiling() {
+        use std::io::Write as _;
+
+        let mut builder = tar::Builder::new(Vec::new());
+        let payload = vec![b'a'; MAX_ARCHIVE_OVERHEAD_BYTES + 4096];
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::GNULongName);
+        header.set_size(payload.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder.append(&header, payload.as_slice()).unwrap();
+        let tar = builder.into_inner().unwrap();
+
+        let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+        gzip.write_all(&tar).unwrap();
+        let gzip = gzip.finish().unwrap();
+        assert!(gzip.len() < MAX_ARCHIVE_OVERHEAD_BYTES / 10);
+
+        let err = Template::from_archive(&gzip, 1024).expect_err("metadata bomb");
+        assert!(matches!(err, TemplateError::BadArchive(_)), "{err:?}");
     }
 
     #[test]
