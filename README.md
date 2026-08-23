@@ -9,24 +9,17 @@ Self-host the `/mcp` endpoint on your own domain.
 
 ## Status
 
-Production currently runs `v0.1.8` at `https://typst-mcp.hanso.group`. It ships one
-Hanso template and seven MCP tools. The `v0.2.0` release candidate ships Hanso, KSC,
-Lenno and Freudenberg and exposes
-the full eight-tool surface, including text-only `typst_upload_template`, and adds
-tenant-scoped ephemeral template resolution plus safe REST tar/gzip upload and deletion.
-It has also replaced bulk worker
-frames with parent-staged path-only I/O, made direct-PDF responses no-store, unified error
-mapping, added tenant-bound OIDC downloads, completed the MCP argument/filter surface, and
-isolated uploaded fonts to one job. It also exposes bounded Prometheus metrics on a
-separate listener, optionally exports OTLP traces, and emits content-free audit envelopes.
-The exact linux/amd64 image now passes a ten-step local smoke suite, and CI builds/loads
-that image before any tag can be published. The complete 10,000-compile soak remains
-release evidence;
-deployed `v0.1.8` predates all current-main checkpoints. See `Plan.md` for the checklist.
+Production runs `v0.2.0` at `https://typst-mcp.hanso.group`. It ships Hanso, KSC, Lenno
+and Freudenberg templates and the complete eight-tool MCP surface. The deployed image is
+the exact linux/amd64 artifact that passed the ten-step REST/MCP smoke suite; the release
+also passed the 10,000-distinct-filename soak, dependency policy checks, and security
+review. Current distribution proof is recorded in
+[`docs/release-evidence.md`](docs/release-evidence.md), and the completed build plan is
+recorded in [`Plan.md`](Plan.md).
 
 ## Shape (RFC 9728 / MCP authorization)
 
-Matches [matrix-mcp](https://github.com/jlxq0/matrix-mcp), not the older
+Matches [matrix-mcp](https://forge.oddie.app/jlxq0/matrix-mcp), not the older
 origin-only metadata:
 
 | Piece | Value |
@@ -68,7 +61,7 @@ cleartext `http` only on a loopback host (RFC 8252 §7.3). There is no
 | `typst_fonts` | Fonts available to compiles |
 | `typst_assets` | List uploaded assets for the caller |
 | `typst_link` | Mint a short-lived signed download URL |
-| `typst_upload_template` | Create a tenant-scoped text-only template (release candidate; not deployed `v0.1.8`) |
+| `typst_upload_template` | Create a tenant-scoped text-only template |
 
 REST (`/api/v1`) is the same surface behind static API keys, for services that
 should not put a long-lived secret in a desktop MCP client.
@@ -189,6 +182,12 @@ a local linux/amd64 image tarball on every ref, loads it, and runs `scripts/smok
 that exact image. Only a `v*` tag can add registry tags and push the already-smoked image to
 `forge.oddie.app/jlxq0/typst-mcp`; no post-smoke rebuild occurs. A nightly scheduled run
 also executes the 10,000-distinct-filename RSS soak.
+
+Production deployment is GitOps-managed from
+`oddie-apps/platform/clusters/fondue/typst-mcp/`. A release tag publishes the already
+smoked image to Forge; a reviewed platform change pins its digest, and Argo CD reconciles
+the deployment, service, PVC, ExternalSecret, HTTPRoute, network policy, metrics scrape,
+and alert rule. Forge is the canonical git and image origin.
 
 ```sh
 docker run --rm -p 3000:3000 \

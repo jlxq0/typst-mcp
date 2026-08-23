@@ -4,26 +4,17 @@ Renders branded PDFs with Typst, over MCP (`/mcp`) and a REST API (`/api/v1`). R
 axum + rmcp. Typst is linked in-process; every compile runs in a one-shot subprocess.
 Specs in `.spec/`, ordered tasks in `Plan.md`, success criteria in `GOAL.md`.
 
-## Current versus target (2026-08-22)
+## Current distribution state (reverified 2026-08-23)
 
-- Current production is `v0.1.8` at `https://typst-mcp.hanso.group`: the compile sandbox,
-  Entra validation, same-origin DCR/OAuth bridge, tenant store, signed links, Hanso template,
-  asset upload and seven MCP tools are real.
-- The `v0.2.0` release candidate has path-only worker control frames, parent-owned RAII job workspaces,
-  and a compile-only no-store `output=pdf` path; deployed `v0.1.8` predates those changes.
-  The same branch also has one sanitized HTTP/MCP domain-error mapping and tenant-bound
-  OIDC bearer downloads with signed-link outage fallback, the eighth text-only
-  `typst_upload_template` tool, tenant-scoped ephemeral resolution, and REST tar/gzip
-  template upload/deletion. Full compile/render arguments, asset roles/filters, and
-  RAII-workspace-scoped uploaded fonts are also implemented. KSC, Lenno and Freudenberg are vendored
-  from canonical OfficeMaster commits with schemas, safe fixtures and licensed brand fonts.
-  Fifteen reviewed Google Fonts families are pinned with per-file checksums and licence
-  texts; CI verifies the committed set offline.
-  A separate `/metrics` listener, bounded Prometheus aggregates, optional OTLP tracing,
-  and envelope-only audit events are implemented with content-leak regression tests.
-  The ten-step smoke suite passes against the exact locally built linux/amd64 image, and
-  the workflow loads/smokes before tag publication. A green Forge run and one complete
-  10,000-filename soak remain release evidence.
+- Production runs `v0.2.0` at `https://typst-mcp.hanso.group`, with four templates and all
+  eight MCP tools. It is `1/1` Ready with zero restarts on the published digest.
+- Path-only worker frames, compile-only no-store PDF output, shared sanitized REST/MCP
+  errors, tenant-bound OIDC downloads, ephemeral templates, full compile/render arguments,
+  asset roles/filters, per-job uploaded fonts, bounded metrics, optional OTLP, and
+  envelope-only audit events are deployed.
+- Forge builds and smokes the exact linux/amd64 image before tag publication. The release
+  ten-step smoke and 10,000-distinct-filename soak both pass; current evidence is recorded
+  in `docs/release-evidence.md`.
 - The live store is a 5 GiB ReadWriteOnce PVC on one replica with `Recreate` rollout. It
   survives pod replacement; TTL and LRU quotas govern content, and PVC capacity is the
   final disk bound. It is still a re-creatable cache, not durable business storage.
@@ -249,11 +240,11 @@ cargo fmt --all --check \
   and the client hangs with no error.
 - 1Password: store `onepassword-hanso` reaches vaults `Gruyere` and `Oddie Apps`. There
   is no vault named "Hanso". Registry creds are shared from the `matrix-mcp-www` item.
-  The app's own item is **`typst-mcp-www` in `Oddie Apps`**, not Gruyere — the comment in
-  `platform/clusters/fondue/typst-mcp/external-secret.yaml` still says Gruyere and is
-  wrong. It currently maps only `TENANT_SALT`, `SIGNING_SECRET`, and `OIDC_ISSUER`.
+  The app's own item is **`typst-mcp-www` in `Oddie Apps`**, not Gruyere. Its live
+  ExternalSecret maps `TENANT_SALT`, `SIGNING_SECRET`, `OIDC_ISSUER`, and `API_KEYS` and is
+  `Ready=True` / `SecretSynced`.
   `OIDC_AUDIENCE`, `OIDC_TENANT_ID`, `DCR_CLIENT_ID`, and the redirect allowlist are
-  reviewed public deployment values; mapping `API_KEYS` remains release work.
+  reviewed public deployment values.
 
 ## Verified environment facts (2026-08-17)
 

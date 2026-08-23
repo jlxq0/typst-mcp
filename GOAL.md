@@ -31,7 +31,7 @@ Templates and fonts are **baked** into the image when they are ours and reused (
 reviewed, permanent) and **uploaded** when they are one-off (a client's letterhead, a brand
 typeface, a template Claude just drafted). Uploads are TTL'd and per-caller.
 
-### Current distribution checkpoint (2026-08-22)
+### Current distribution checkpoint (2026-08-22; reverified 2026-08-23)
 
 `v0.2.0` is released and deployed by digest
 `sha256:67b2817da5232e8331fa4c3a43922a07f9ff4b62889568efa0e6531790635285`.
