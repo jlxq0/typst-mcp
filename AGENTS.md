@@ -1,5 +1,29 @@
 # Known Pitfalls
 
+- **A test named after the running system that takes no input from it is a comment with
+  a `#[test]` on it.** `deployed_allowlist_parses` asserted "the exact set the deployment
+  ships" with nine entries while the live container env carried seven — a second loopback
+  path missing, three private-use entries listed that production does not have. It stayed
+  green, and could not have done otherwise: `raw` was a literal and the length assertion
+  counted what that literal parsed to, so the deployment was never an input. Renaming it
+  to a dated snapshot does not fix that, it only stops it lying. Read an allowlist off the
+  thing enforcing it — `kubectl -n typst-mcp get deploy -o jsonpath=...` over the container
+  env — and treat any in-repo copy as undated until you have. The same fixture in
+  `caldav-mcp`, `carddav-mcp` and `jmap-mcp` matched their deployments on 2026-08-25, so
+  accuracy here is luck, not coverage. The cross-repo decision lives in
+  https://forge.oddie.app/jlxq0/caldav-mcp/issues/7. Found 2026-08-25.
+
+- **A loopback redirect URI must match on any port (RFC 8252 §7.3).** `validate_redirect_uri`
+  carried the loopback carve-out for the *scheme* (cleartext `http` on loopback only) but
+  `is_allowed_redirect_uri` still demanded exact string equality, so an allowlisted
+  `http://localhost:8787/callback` could never match Claude Code CLI, which binds a random
+  free port per session. The symptom is not a matcher error anyone reads: DCR answers
+  `400 unregistered redirect_uri` and native loopback clients are permanently locked out.
+  Relax the port for cleartext loopback entries only, and keep scheme, host, path and
+  query exact — `/callback` must not start matching `/oauth/callback`, `localhost` is not
+  `127.0.0.1`, and relaxing the port on `https://claude.ai/...` would be a real hole.
+  Found 2026-08-25.
+
 - **Validate an entire asset list before reading any asset bytes.** The render path used
   to load each referenced asset into the long-lived parent process and only later let
   `Bundle::new` enforce duplicate paths, file count, and aggregate size. Repeating one
