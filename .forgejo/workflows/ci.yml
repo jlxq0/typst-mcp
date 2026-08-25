@@ -143,6 +143,16 @@ jobs:
           EXPORT_CACHE_ARG=()
           if [[ "${GITHUB_EVENT_NAME}" != pull_request ]]; then
             IMPORT_CACHE_ARG=(--import-cache "type=registry,ref=${CACHE_REF}")
+          fi
+          # `main` is the only writer. Merging a PR and pushing the release tag
+          # are two pushes, so two `docker` jobs run at once; with both
+          # exporting to one unqualified `:buildcache` ref, one loses the blob
+          # write and fails with `error writing layer blob: unknown` — after the
+          # image has already been pushed. A tag build is the same commit as the
+          # `main` build that preceded it, so its cache would be byte-identical
+          # and it loses nothing by importing only. One writer removes the race
+          # by construction rather than by scheduling.
+          if [[ "${GITHUB_REF}" == refs/heads/main ]]; then
             EXPORT_CACHE_ARG=(--export-cache "type=registry,ref=${CACHE_REF},mode=max")
           fi
           buildctl build \
