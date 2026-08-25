@@ -43,6 +43,15 @@ pub fn is_allowed_redirect_uri(allowed: &[String], uri: &str) -> bool {
 
 /// `Some(url)` only for a cleartext `http` URL on a loopback host — the one
 /// case RFC 8252 §7.3 lets the port vary.
+///
+/// The scheme check is load-bearing on the *requested* side: without it
+/// `https://localhost:3118/callback` would match an `http` loopback entry.
+/// The `is_loopback_host` check is redundant today — `validate_redirect_uri`
+/// already rejects cleartext non-loopback hosts on both the request and the
+/// allowlist entry, and host equality would refuse the pair anyway — so no
+/// test can kill it by mutation. It stays as the second line of defence for a
+/// caller that hands `is_allowed_redirect_uri` a list which never went through
+/// `parse_allowlist`.
 fn parse_loopback_http(uri: &str) -> Option<Url> {
     let url = Url::parse(uri).ok()?;
     if url.scheme() != "http" {
@@ -270,6 +279,39 @@ mod tests {
         assert!(!is_allowed_redirect_uri(
             &allowed,
             "http://127.0.0.1:3118/callback"
+        ));
+    }
+
+    /// The *requested* URI's scheme is guarded, not only the entry's. Without
+    /// that check `https://localhost:3118/callback` would match an `http`
+    /// loopback entry — TLS on loopback is not the case RFC 8252 §7.3 carves
+    /// out, and the mismatch means the client is not the one that registered.
+    #[test]
+    fn loopback_relaxation_does_not_cross_schemes() {
+        let allowed = parse_allowlist("http://localhost:8787/callback", "TEST").unwrap();
+        assert!(!is_allowed_redirect_uri(
+            &allowed,
+            "https://localhost:3118/callback"
+        ));
+        assert!(!is_allowed_redirect_uri(
+            &allowed,
+            "https://localhost:8787/callback"
+        ));
+
+        // ...and the mirror: an `https` loopback entry is matched exactly, so
+        // it never picks up a cleartext request or a different port.
+        let https_entry = parse_allowlist("https://localhost:8787/callback", "TEST").unwrap();
+        assert!(!is_allowed_redirect_uri(
+            &https_entry,
+            "http://localhost:8787/callback"
+        ));
+        assert!(!is_allowed_redirect_uri(
+            &https_entry,
+            "https://localhost:3118/callback"
+        ));
+        assert!(is_allowed_redirect_uri(
+            &https_entry,
+            "https://localhost:8787/callback"
         ));
     }
 
