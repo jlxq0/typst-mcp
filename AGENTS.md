@@ -1,12 +1,16 @@
 # Known Pitfalls
 
-- **A test named after the deployment is a claim about the running system, and it rots.**
-  `deployed_allowlist_parses` asserted "the exact set the deployment ships" with nine
-  entries; the live container env carried seven, including a second loopback path the
-  fixture did not have and three private-use entries the deployment did not. Nothing
-  failed, because the test only checked that its own string parsed. Read an allowlist off
-  the thing enforcing it (`kubectl -n typst-mcp get deploy -o jsonpath=...` over the
-  container env), not off a manifest or a fixture, and date the reading. Found 2026-08-25.
+- **A test named after the running system that takes no input from it is a comment with
+  a `#[test]` on it.** `deployed_allowlist_parses` asserted "the exact set the deployment
+  ships" with nine entries while the live container env carried seven — a second loopback
+  path missing, three private-use entries listed that production does not have. It stayed
+  green, and could not have done otherwise: `raw` was a literal and the length assertion
+  counted what that literal parsed to, so the deployment was never an input. Renaming it
+  to a dated snapshot does not fix that, it only stops it lying. Read an allowlist off the
+  thing enforcing it — `kubectl -n typst-mcp get deploy -o jsonpath=...` over the container
+  env — and treat any in-repo copy as undated until you have. The same fixture in
+  `caldav-mcp`, `carddav-mcp` and `jmap-mcp` matched their deployments on 2026-08-25, so
+  accuracy here is luck, not coverage. Found 2026-08-25.
 
 - **A loopback redirect URI must match on any port (RFC 8252 §7.3).** `validate_redirect_uri`
   carried the loopback carve-out for the *scheme* (cleartext `http` on loopback only) but

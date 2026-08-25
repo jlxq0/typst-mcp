@@ -410,16 +410,32 @@ mod tests {
         ));
     }
 
-    /// The set the running deployment actually carries, read off the live
-    /// container env on 2026-08-25 rather than off a manifest. It is not the
-    /// same as `allowlist_accepts_the_shapes_we_support` below, and this test
-    /// is the one that must be re-read against the cluster when it changes.
+    /// A hand-copied snapshot of the allowlist the deployment was running on
+    /// 2026-08-25, read off the live container env rather than off a manifest.
     ///
-    /// Two of its seven entries are loopback URIs sharing a host and port and
-    /// differing only by path, which is why `loopback_paths_stay_distinct`
-    /// guards a real production shape.
+    /// **This test cannot detect drift, and must not be read as if it could.**
+    /// `raw` is a literal and the assertions count what that literal parsed to,
+    /// so the deployment is not an input and no change to it can turn this red.
+    /// It pins matcher *behaviour* against a shape production really had; the
+    /// only way to know the shape is still current is to ask the thing
+    /// enforcing it:
+    ///
+    /// ```text
+    /// kubectl -n typst-mcp get deploy \
+    ///   -o jsonpath='{range .items[*].spec.template.spec.containers[*].env[*]}{.name}={.value}{"\n"}{end}' \
+    ///   | grep REDIRECT
+    /// ```
+    ///
+    /// The previous version of this test claimed to be "the exact set the
+    /// deployment ships" while carrying nine entries against the live seven,
+    /// and stayed green throughout — which is the failure mode being named
+    /// here, not a fixed bug.
+    ///
+    /// Two of the seven are loopback URIs sharing a host and port and differing
+    /// only by path, which is why `loopback_paths_stay_distinct` guards a real
+    /// production shape rather than an invented one.
     #[test]
-    fn deployed_allowlist_parses() {
+    fn production_allowlist_snapshot_behaves() {
         let raw = "https://claude.ai/api/mcp/auth_callback,\
                    https://claude.com/api/mcp/auth_callback,\
                    https://www.cursor.com/agents/mcp/oauth/callback,\
@@ -449,8 +465,9 @@ mod tests {
 
     /// Shapes the allowlist must keep parsing, whether or not the deployment
     /// currently lists them — private-use schemes registered by native MCP
-    /// clients. Not a claim about what is deployed; see
-    /// `deployed_allowlist_parses` for that.
+    /// clients. Makes no claim about production; see
+    /// `production_allowlist_snapshot_behaves` for the snapshot, and note that
+    /// it cannot detect drift either.
     #[test]
     fn allowlist_accepts_the_shapes_we_support() {
         let raw = "claude://claude.ai/oauth/callback,\
