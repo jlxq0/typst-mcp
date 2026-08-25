@@ -282,10 +282,20 @@ mod tests {
         ));
     }
 
-    /// The *requested* URI's scheme is guarded, not only the entry's. Without
-    /// that check `https://localhost:3118/callback` would match an `http`
-    /// loopback entry — TLS on loopback is not the case RFC 8252 §7.3 carves
-    /// out, and the mismatch means the client is not the one that registered.
+    /// The scheme is guarded on both sides, and each side has its own
+    /// assertion here because each fails differently.
+    ///
+    /// Drop the check on the *requested* URI and `https://localhost:3118/callback`
+    /// matches an `http` loopback entry: TLS on loopback is not the case
+    /// RFC 8252 §7.3 carves out, and the mismatch means the caller is not the
+    /// client that registered.
+    ///
+    /// Drop it on the *allowlist entry* and an `https://localhost:8443/callback`
+    /// entry port-relaxes into a cleartext `http://localhost:3118/callback` —
+    /// an https-to-http downgrade on an entry an operator wrote expecting TLS,
+    /// putting the authorization code on the wire in the clear. That is worse
+    /// than the lockout this commit fixes, so it gets its own assertion rather
+    /// than riding on the first one.
     #[test]
     fn loopback_relaxation_does_not_cross_schemes() {
         let allowed = parse_allowlist("http://localhost:8787/callback", "TEST").unwrap();
