@@ -1367,6 +1367,70 @@ async fn native_client_callbacks_register_and_authorize() {
     assert_eq!(rejected.status(), 400);
 }
 
+/// The reported symptom, end to end: Claude Code CLI binds a random free
+/// loopback port per session, so DCR and the authorize proxy both saw a port
+/// the allowlist could not carry and answered
+/// `Dynamic Client Registration rejected (HTTP 400): unregistered redirect_uri`.
+/// RFC 8252 §7.3 requires any port to be accepted on a loopback redirect.
+#[tokio::test]
+async fn loopback_callback_registers_and_authorizes_on_any_port() {
+    let server = TestServer::start_with(&[
+        ("OIDC_ISSUER", "https://login.microsoftonline.com/abc/v2.0"),
+        ("OIDC_AUDIENCE", "api://typst-mcp"),
+        ("DCR_CLIENT_ID", "e20d1345-7e4e-4298-bf8d-6d4606b1ecb4"),
+        (
+            "OAUTH_REDIRECT_URIS",
+            "https://claude.ai/api/mcp/auth_callback,http://localhost:8787/callback",
+        ),
+    ])
+    .await;
+
+    // The port Claude Code CLI actually drew in the failing session.
+    let uri = "http://localhost:3118/callback";
+    let created = server
+        .client
+        .post(server.url("/register"))
+        .json(&serde_json::json!({ "redirect_uris": [uri] }))
+        .send()
+        .await
+        .expect("register");
+    assert_eq!(created.status(), 201, "DCR must accept {uri}");
+    let reg: serde_json::Value = created.json().await.expect("json");
+    assert_eq!(reg["redirect_uris"][0], uri);
+
+    let no_follow = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("client");
+    let authorize = no_follow
+        .get(server.url(&format!(
+            "/authorize?response_type=code&client_id=e20d1345-7e4e-4298-bf8d-6d4606b1ecb4\
+             &redirect_uri={}&state=s&code_challenge=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&code_challenge_method=S256",
+            urlencoding(uri)
+        )))
+        .send()
+        .await
+        .expect("authorize");
+    assert_eq!(authorize.status(), 303, "authorize must redirect for {uri}");
+
+    // A different path on the same loopback host is still not registered, and
+    // a different loopback host is a different entry.
+    for refused in [
+        "http://localhost:3118/oauth/callback",
+        "http://127.0.0.1:3118/callback",
+        "https://claude.ai:8443/api/mcp/auth_callback",
+    ] {
+        let response = server
+            .client
+            .post(server.url("/register"))
+            .json(&serde_json::json!({ "redirect_uris": [refused] }))
+            .send()
+            .await
+            .expect("register");
+        assert_eq!(response.status(), 400, "DCR must refuse {refused}");
+    }
+}
+
 /// Percent-encode a query-parameter value. Hand-rolled rather than pulled from
 /// `url`, which is a normal dependency and so invisible to an integration test.
 fn urlencoding(value: &str) -> String {

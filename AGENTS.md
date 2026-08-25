@@ -1,5 +1,16 @@
 # Known Pitfalls
 
+- **A loopback redirect URI must match on any port (RFC 8252 §7.3).** `validate_redirect_uri`
+  carried the loopback carve-out for the *scheme* (cleartext `http` on loopback only) but
+  `is_allowed_redirect_uri` still demanded exact string equality, so an allowlisted
+  `http://localhost:8787/callback` could never match Claude Code CLI, which binds a random
+  free port per session. The symptom is not a matcher error anyone reads: DCR answers
+  `400 unregistered redirect_uri` and native loopback clients are permanently locked out.
+  Relax the port for cleartext loopback entries only, and keep scheme, host, path and
+  query exact — `/callback` must not start matching `/oauth/callback`, `localhost` is not
+  `127.0.0.1`, and relaxing the port on `https://claude.ai/...` would be a real hole.
+  Found 2026-08-25.
+
 - **Validate an entire asset list before reading any asset bytes.** The render path used
   to load each referenced asset into the long-lived parent process and only later let
   `Bundle::new` enforce duplicate paths, file count, and aggregate size. Repeating one
