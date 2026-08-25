@@ -10,7 +10,8 @@
   thing enforcing it — `kubectl -n typst-mcp get deploy -o jsonpath=...` over the container
   env — and treat any in-repo copy as undated until you have. The same fixture in
   `caldav-mcp`, `carddav-mcp` and `jmap-mcp` matched their deployments on 2026-08-25, so
-  accuracy here is luck, not coverage. Found 2026-08-25.
+  accuracy here is luck, not coverage. The cross-repo decision lives in
+  https://forge.oddie.app/jlxq0/caldav-mcp/issues/7. Found 2026-08-25.
 
 - **A loopback redirect URI must match on any port (RFC 8252 §7.3).** `validate_redirect_uri`
   carried the loopback carve-out for the *scheme* (cleartext `http` on loopback only) but
