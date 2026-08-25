@@ -256,10 +256,17 @@ mod tests {
 
     /// Two loopback entries differing only by path must stay distinct — a
     /// port-agnostic comparison must not degrade into a prefix match.
+    ///
+    /// This is not a synthetic shape. The running deployment carries both
+    /// `http://localhost:8787/callback` and `http://localhost:8787/oauth/callback`
+    /// — same scheme, same host, same port, differing only by path (read off
+    /// the live container env 2026-08-25). A path relaxation would silently
+    /// merge those two in production, so keep the pair here and do not weaken
+    /// path comparison to a prefix or a `starts_with`.
     #[test]
     fn loopback_paths_stay_distinct() {
         let allowed = parse_allowlist(
-            "http://localhost:8787/callback,http://127.0.0.1:8787/oauth/callback",
+            "http://localhost:8787/callback,http://localhost:8787/oauth/callback",
             "TEST",
         )
         .unwrap();
@@ -270,15 +277,22 @@ mod tests {
         ));
         assert!(is_allowed_redirect_uri(
             &allowed,
-            "http://127.0.0.1:3118/oauth/callback"
-        ));
-        assert!(!is_allowed_redirect_uri(
-            &allowed,
             "http://localhost:3118/oauth/callback"
         ));
+        // Neither entry may absorb a third path, in either direction.
+        assert!(!is_allowed_redirect_uri(
+            &allowed,
+            "http://localhost:3118/callback/oauth"
+        ));
+        assert!(!is_allowed_redirect_uri(&allowed, "http://localhost:3118/"));
+        // ...and a different loopback host is still a different entry.
         assert!(!is_allowed_redirect_uri(
             &allowed,
             "http://127.0.0.1:3118/callback"
+        ));
+        assert!(!is_allowed_redirect_uri(
+            &allowed,
+            "http://127.0.0.1:3118/oauth/callback"
         ));
     }
 
@@ -325,6 +339,52 @@ mod tests {
         ));
     }
 
+    /// `url` canonicalises the host before anything here sees it: `127.1`,
+    /// `0177.0.0.1` and `2130706433` all parse to `127.0.0.1`. Two consequences
+    /// worth pinning, because neither is visible in the matcher's own text.
+    ///
+    /// Host spelling cannot be used to slip past the loopback carve-out, and it
+    /// cannot be used to evade an allowlist entry either — comparison is on the
+    /// canonical form, so an entry written `127.0.0.1` matches a request
+    /// written `127.1`. Those are the same host, so that is the right answer.
+    ///
+    /// It also means the host term enforces nothing against an obfuscated
+    /// downgrade attempt: the entry-side scheme guard is the whole control.
+    #[test]
+    fn obfuscated_loopback_spellings_canonicalise() {
+        let allowed = parse_allowlist("http://127.0.0.1:8787/callback", "TEST").unwrap();
+        for spelling in [
+            "http://127.1:3118/callback",
+            "http://0177.0.0.1:3118/callback",
+            "http://2130706433:3118/callback",
+            "http://127.0.0.1:3118/callback",
+        ] {
+            assert!(
+                is_allowed_redirect_uri(&allowed, spelling),
+                "{spelling} is 127.0.0.1 and must match"
+            );
+        }
+        // ...and `localhost` is still a different host from every one of them.
+        assert!(!is_allowed_redirect_uri(
+            &allowed,
+            "http://localhost:3118/callback"
+        ));
+
+        // The downgrade is refused for every spelling, by the scheme guard
+        // alone — each of these is a loopback host by the time it is checked.
+        let https_entry = parse_allowlist("https://127.0.0.1:8443/callback", "TEST").unwrap();
+        for spelling in [
+            "http://127.0.0.1:3118/callback",
+            "http://127.1:3118/callback",
+            "http://0177.0.0.1:3118/callback",
+        ] {
+            assert!(
+                !is_allowed_redirect_uri(&https_entry, spelling),
+                "{spelling} must not downgrade an https entry to cleartext"
+            );
+        }
+    }
+
     /// The port is meaningful for anything that is not cleartext loopback.
     /// Relaxing it on `https://claude.ai/...` would be a real hole.
     #[test]
@@ -350,7 +410,14 @@ mod tests {
         ));
     }
 
-    /// The exact set the deployment ships, parsed as one env value.
+    /// The set the running deployment actually carries, read off the live
+    /// container env on 2026-08-25 rather than off a manifest. It is not the
+    /// same as `allowlist_accepts_the_shapes_we_support` below, and this test
+    /// is the one that must be re-read against the cluster when it changes.
+    ///
+    /// Two of its seven entries are loopback URIs sharing a host and port and
+    /// differing only by path, which is why `loopback_paths_stay_distinct`
+    /// guards a real production shape.
     #[test]
     fn deployed_allowlist_parses() {
         let raw = "https://claude.ai/api/mcp/auth_callback,\
@@ -359,10 +426,38 @@ mod tests {
                    cursor://anysphere.cursor-mcp/oauth/callback,\
                    grokbot://mcp/oauth/callback,\
                    http://localhost:8787/callback,\
-                   claude://claude.ai/oauth/callback,\
+                   http://localhost:8787/oauth/callback";
+        let allowed = parse_allowlist(raw, ENV_OAUTH_REDIRECT_URIS).unwrap();
+        assert_eq!(allowed.len(), 7);
+
+        // Claude Code CLI draws a random loopback port; both deployed loopback
+        // paths must accept it, and must not accept each other's path.
+        assert!(is_allowed_redirect_uri(
+            &allowed,
+            "http://localhost:3118/callback"
+        ));
+        assert!(is_allowed_redirect_uri(
+            &allowed,
+            "http://localhost:3118/oauth/callback"
+        ));
+        // Everything non-loopback in the deployed set still needs its exact port.
+        assert!(!is_allowed_redirect_uri(
+            &allowed,
+            "https://claude.ai:8443/api/mcp/auth_callback"
+        ));
+    }
+
+    /// Shapes the allowlist must keep parsing, whether or not the deployment
+    /// currently lists them — private-use schemes registered by native MCP
+    /// clients. Not a claim about what is deployed; see
+    /// `deployed_allowlist_parses` for that.
+    #[test]
+    fn allowlist_accepts_the_shapes_we_support() {
+        let raw = "claude://claude.ai/oauth/callback,\
                    claude://oauth/callback,\
                    cowork://oauth/callback";
         let allowed = parse_allowlist(raw, ENV_OAUTH_REDIRECT_URIS).unwrap();
-        assert_eq!(allowed.len(), 9);
+        assert_eq!(allowed.len(), 3);
+        assert!(is_allowed_redirect_uri(&allowed, "claude://oauth/callback"));
     }
 }

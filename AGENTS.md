@@ -1,5 +1,13 @@
 # Known Pitfalls
 
+- **A test named after the deployment is a claim about the running system, and it rots.**
+  `deployed_allowlist_parses` asserted "the exact set the deployment ships" with nine
+  entries; the live container env carried seven, including a second loopback path the
+  fixture did not have and three private-use entries the deployment did not. Nothing
+  failed, because the test only checked that its own string parsed. Read an allowlist off
+  the thing enforcing it (`kubectl -n typst-mcp get deploy -o jsonpath=...` over the
+  container env), not off a manifest or a fixture, and date the reading. Found 2026-08-25.
+
 - **A loopback redirect URI must match on any port (RFC 8252 §7.3).** `validate_redirect_uri`
   carried the loopback carve-out for the *scheme* (cleartext `http` on loopback only) but
   `is_allowed_redirect_uri` still demanded exact string equality, so an allowlisted
