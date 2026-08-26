@@ -66,9 +66,19 @@ jobs:
       - name: test
         run: cargo test --all-features --locked
       - name: audit
+        # No `--ignore` flags. Suppressions live in `.cargo/audit.toml` and nowhere
+        # else. `--ignore` suppresses independently of that file rather than being
+        # read from it, so the two copies were not redundant: measured 2026-08-26 by
+        # emptying the file's `ignore` list, the old line here still exited 0 while
+        # a bare `cargo audit` exited 1. Deleting the documented suppression would
+        # therefore have changed nothing anyone could see. With one copy, deleting
+        # the entry is what makes the advisory reappear.
         run: |
           [ -x ~/.cargo/bin/cargo-audit ] || cargo install --locked cargo-audit
-          cargo audit --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195
+          # The binary is restored from cache and never rebuilt, so print which one
+          # ran. Otherwise the version that produced a green audit is unrecorded.
+          cargo audit --version
+          cargo audit
       - uses: EmbarkStudios/cargo-deny-action@6c8f9facfa5047ec02d8485b6bf52b587b7777d1  # v2
         with: { command: check bans licenses sources }
 

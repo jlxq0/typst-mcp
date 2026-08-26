@@ -1,5 +1,18 @@
 # Known Pitfalls
 
+- **A suppression that two places grant is a suppression neither place can remove.**
+  `cargo audit` was invoked with `--ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195`
+  in `.forgejo/workflows/ci.yml` while `.cargo/audit.toml` listed the same two. `--ignore`
+  suppresses independently of the file rather than being read from it, so the copies were
+  not redundant: with the file's `ignore` list emptied, the old CI line still exited 0 and
+  a bare `cargo audit` exited 1. Deleting the documented, commented, reviewable entry would
+  have changed nothing observable, and the next `quick-xml` bump would have kept a live
+  advisory suppressed with nobody able to tell. Keep suppressions in `.cargo/audit.toml`
+  alone and run `cargo audit` bare, so removing an entry is what turns the gate red. The
+  general form: when a control is granted in two places, removing it from one is not a
+  measurement, and the copy you are looking at is usually the one that does nothing.
+  Found 2026-08-26.
+
 - **A test named after the running system that takes no input from it is a comment with
   a `#[test]` on it.** `deployed_allowlist_parses` asserted "the exact set the deployment
   ships" with nine entries while the live container env carried seven — a second loopback
