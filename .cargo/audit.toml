@@ -1,4 +1,11 @@
 # cargo-audit: ignore only what we cannot bump ourselves.
+#
+# This file is the only place an advisory is suppressed. CI runs a bare
+# `cargo audit` with no `--ignore` flags, so deleting an entry below is what makes
+# the advisory reappear in the gate. Verified by removal 2026-08-26: dropping
+# RUSTSEC-2026-0194 from this list took `cargo audit` from exit 0 to exit 1 with
+# "1 vulnerability found!". Do not re-add `--ignore` to the workflow; it suppresses
+# independently of this file, which is how a suppression becomes unremovable.
 [advisories]
 ignore = [
     # Transitive via typst 0.15.1 -> hayagriva -> citationberg -> quick-xml 0.38.4.
