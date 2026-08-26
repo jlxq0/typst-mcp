@@ -75,6 +75,9 @@ jobs:
         # the entry is what makes the advisory reappear.
         run: |
           [ -x ~/.cargo/bin/cargo-audit ] || cargo install --locked cargo-audit
+          # The binary is restored from cache and never rebuilt, so print which one
+          # ran. Otherwise the version that produced a green audit is unrecorded.
+          cargo audit --version
           cargo audit
       - uses: EmbarkStudios/cargo-deny-action@6c8f9facfa5047ec02d8485b6bf52b587b7777d1  # v2
         with: { command: check bans licenses sources }
