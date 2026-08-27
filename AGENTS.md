@@ -1,5 +1,31 @@
 # Known Pitfalls
 
+- **`main` is protected, and `CI / docker` is deliberately not a required context.** The
+  rule requires `CI / cargo*` only, with `enable_push=false`, `apply_to_admins=true`,
+  `required_approvals=0`. Do not "complete" it by adding the docker context: **a job
+  skipped because the job it `needs:` failed still posts `success` to the commit status.**
+  Measured here on three commits, cargo and docker one second apart, with **no docker task
+  in the run at all**:
+
+  | commit | `CI / cargo` | `CI / docker` | docker tasks that ran |
+  |---|---|---|---|
+  | `45b68251` | failure 02:52:14Z | **success** 02:52:15Z | none |
+  | `d8e59351` | failure 02:40:36Z | **success** 02:40:36Z | none |
+  | `54de8c40` | failure 02:27:59Z | **success** 02:27:59Z | none |
+
+  So requiring `CI / docker` builds a gate that is green *because the work did not happen*,
+  which is worse than not requiring it: it reads as broader coverage while being satisfied
+  by the failure it was meant to catch. `docker` still runs and still gates a release —
+  it builds the exact image and smokes it before publishing — it just cannot be a required
+  status while it carries a `needs:`.
+
+  The `*` is also load-bearing. Contexts carry an event suffix: a pull-request head posts
+  `CI / cargo (pull_request)` and a branch push posts `CI / cargo (push)`. A literal
+  string matches one and silently never matches the other, which is an unarmed gate that
+  reads as armed. Verified by removal 2026-08-27 rather than from the API echoing the rule
+  back: with the rule armed, `git push origin main` was refused with `Forgejo: Not allowed
+  to push to protected branch main`, `pre-receive hook declined`, exit 1. Found 2026-08-27.
+
 - **A suppression that two places grant is a suppression neither place can remove.**
   `cargo audit` was invoked with `--ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195`
   in `.forgejo/workflows/ci.yml` while `.cargo/audit.toml` listed the same two. `--ignore`
