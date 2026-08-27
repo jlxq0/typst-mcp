@@ -15,16 +15,48 @@
 
   So requiring `CI / docker` builds a gate that is green *because the work did not happen*,
   which is worse than not requiring it: it reads as broader coverage while being satisfied
-  by the failure it was meant to catch. `docker` still runs and still gates a release —
-  it builds the exact image and smokes it before publishing — it just cannot be a required
+  by the failure it was meant to catch. `docker` still runs and still gates a release,
+  building the exact image and smoking it before publishing. It just cannot be a required
   status while it carries a `needs:`.
 
   The `*` is also load-bearing. Contexts carry an event suffix: a pull-request head posts
   `CI / cargo (pull_request)` and a branch push posts `CI / cargo (push)`. A literal
   string matches one and silently never matches the other, which is an unarmed gate that
-  reads as armed. Verified by removal 2026-08-27 rather than from the API echoing the rule
-  back: with the rule armed, `git push origin main` was refused with `Forgejo: Not allowed
-  to push to protected branch main`, `pre-receive hook declined`, exit 1. Found 2026-08-27.
+  reads as armed.
+
+  **Keep `pull_request:` bare in `.forgejo/workflows/ci.yml`.** The rule depends on two
+  properties of that file, and neither is visible from the protection settings. First, the
+  `cargo` job carries no `needs:` and no job-level `if:`, so it always runs and its status
+  is always the real result. That is why it is safe to require and `docker` is not. Second,
+  `pull_request:` has no `paths:`, `paths-ignore:`, `branches:` or `types:` filter, so
+  every PR produces `CI / cargo (pull_request)`. Adding one would make a filtered-out PR
+  produce no required context at all, and the gate becomes permanently unsatisfiable with
+  **nothing in the protection settings having changed**: a merge blocked forever by a line
+  in a workflow file nobody connects to it. The `branches: [main]` filter in that block is
+  under `push:`, where it cannot affect a PR head.
+
+  Sampled statuses cannot establish this. They say the contexts *have been* produced; the
+  `on:` block and the absence of `needs:` say they *must be*.
+
+  A related consequence worth knowing rather than fixing: `cargo` has two step-level
+  `if: github.event_name != 'pull_request'` conditions, so the OfficeMaster checkout and
+  `scripts/sync-templates.sh --check` do not run on a PR. The job still reports its real
+  result, so the gate stays satisfiable, but `CI / cargo (pull_request)` is a weaker check
+  than `CI / cargo (push)` and template drift is not covered by the required status.
+
+  Verified 2026-08-27 by pushing rather than by reading the rule back, and with an accepted
+  push beside the refused one so the refusal is attributable to the rule rather than to a
+  dead token, a wrong remote or a network fault. One commit, two destinations, after
+  asserting `git merge-base --is-ancestor origin/main HEAD` so neither could be refused by
+  git as a non-fast-forward before reaching the hook:
+
+      git push origin "${probe}:refs/heads/probe/armed-control"   exit 0, * [new branch]
+      git push origin "${probe}:refs/heads/main"                  exit 1, ! [remote rejected]
+                                                                  pre-receive hook declined
+
+  Brace the refspec. Unbraced, zsh reads `"$probe:refs/..."` as the `:r` history modifier
+  and pushes something else. Read the remote's own line, not the exit code. Found
+  2026-08-27.
 
 - **A suppression that two places grant is a suppression neither place can remove.**
   `cargo audit` was invoked with `--ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195`
