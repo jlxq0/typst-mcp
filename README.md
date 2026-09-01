@@ -14,8 +14,7 @@ and Freudenberg templates and the complete eight-tool MCP surface. The deployed 
 the exact linux/amd64 artifact that passed the ten-step REST/MCP smoke suite; the release
 also passed the 10,000-distinct-filename soak, dependency policy checks, and security
 review. Current distribution proof is recorded in
-[`docs/release-evidence.md`](docs/release-evidence.md), and the completed build plan is
-recorded in [`Plan.md`](Plan.md).
+[`docs/release-evidence.md`](docs/release-evidence.md).
 
 ## Shape (RFC 9728 / MCP authorization)
 
