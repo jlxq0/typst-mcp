@@ -154,15 +154,26 @@ jobs:
           if [[ "${GITHUB_EVENT_NAME}" != pull_request ]]; then
             IMPORT_CACHE_ARG=(--import-cache "type=registry,ref=${CACHE_REF}")
           fi
-          # `main` is the only writer. Merging a PR and pushing the release tag
-          # are two pushes, so two `docker` jobs run at once; with both
-          # exporting to one unqualified `:buildcache` ref, one loses the blob
-          # write and fails with `error writing layer blob: unknown` — after the
-          # image has already been pushed. A tag build is the same commit as the
-          # `main` build that preceded it, so its cache would be byte-identical
-          # and it loses nothing by importing only. One writer removes the race
-          # by construction rather than by scheduling.
-          if [[ "${GITHUB_REF}" == refs/heads/main ]]; then
+          # A push to `main` is the only writer. Merging a PR and pushing the
+          # release tag are two pushes, so two `docker` jobs run at once; with
+          # both exporting to one unqualified `:buildcache` ref, one loses the
+          # blob write and fails with `error writing layer blob: unknown`, after
+          # the image has already been pushed. A tag build is the same commit as
+          # the `main` build that preceded it, so its cache would be byte-identical
+          # and it loses nothing by importing only.
+          #
+          # The event test is load-bearing and not belt-and-braces. `schedule`
+          # and `workflow_dispatch` also carry GITHUB_REF=refs/heads/main, so a
+          # ref-only guard admits two more writers, and Forgejo's default
+          # auto-cancel covers `push` and `pull_request` (synchronize) only: a
+          # cron run overlapping a merge build is neither cancelled nor
+          # cancelling. Both build the same commit `main` already built, so
+          # their exports would be byte-identical and cost a race for nothing.
+          # One writer by construction rather than by scheduling, which is also
+          # why there is no top-level `concurrency:` block: it would serialise
+          # the whole run, `cargo` included, on a shared-capacity runner to
+          # solve a problem this line closes. jlxq0/typst-mcp#18.
+          if [[ "${GITHUB_REF}" == refs/heads/main && "${GITHUB_EVENT_NAME}" == push ]]; then
             EXPORT_CACHE_ARG=(--export-cache "type=registry,ref=${CACHE_REF},mode=max")
           fi
           buildctl build \

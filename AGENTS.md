@@ -1,5 +1,23 @@
 # Known Pitfalls
 
+- **`GITHUB_REF` does not identify a trigger, so a ref-only guard does not name one
+  writer.** The buildcache export was guarded on `refs/heads/main` alone, which reads as
+  "only the main build writes". `schedule` and `workflow_dispatch` carry the same ref, so
+  it admitted three writers, and Forgejo's default auto-cancel covers `push` and
+  `pull_request` (synchronize) **only**: a cron run overlapping a merge build is neither
+  cancelled nor cancelling. Two concurrent exports to one unqualified `:buildcache` ref
+  lose a blob write and fail with `error writing layer blob: unknown`, **after the image
+  has already been pushed**. Test the event as well as the ref. Verified by exercising the
+  condition over all five trigger cases rather than by reasoning about it: `main`+`push`
+  exports before and after, `main`+`schedule` and `main`+`workflow_dispatch` change from
+  export to import-only, tag and pull-request are unaffected. The `main`+`push` row is the
+  control; without it the change is indistinguishable from having disabled the export.
+  Not fixed with a top-level `concurrency:` block, which would serialise the whole run,
+  `cargo` included, on a shared-capacity runner to solve what one condition closes, and
+  **job-level `concurrency:` is silently ignored on this Forgejo** so the block is one
+  refactor away from doing nothing while still parsing. `jlxq0/typst-mcp#18`,
+  `jlxq0/mantis#32`. Found 2026-09-02.
+
 - **`main` is protected, and `CI / docker` is deliberately not a required context.** The
   rule requires `CI / cargo*` only, with `enable_push=false`, `apply_to_admins=true`,
   `required_approvals=0`. Do not "complete" it by adding the docker context: **a job
