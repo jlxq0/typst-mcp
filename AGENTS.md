@@ -390,13 +390,20 @@ cargo fmt --all --check \
   terminates at the edge and routes set `X-Forwarded-Proto: https` themselves.
 - MCP vhosts need **`flush_interval -1`** in Caddy or the streamable-HTTP stream buffers
   and the client hangs with no error.
-- 1Password: store `onepassword-hanso` reaches vaults `Gruyere` and `Oddie Apps`. There
-  is no vault named "Hanso". Registry creds are shared from the `matrix-mcp-www` item.
-  The app's own item is **`typst-mcp-www` in `Oddie Apps`**, not Gruyere. Its live
-  ExternalSecret maps `TENANT_SALT`, `SIGNING_SECRET`, `OIDC_ISSUER`, and `API_KEYS` and is
-  `Ready=True` / `SecretSynced`.
-  `OIDC_AUDIENCE`, `OIDC_TENANT_ID`, `DCR_CLIENT_ID`, and the redirect allowlist are
-  reviewed public deployment values.
+- Secrets come from 1Password through ExternalSecrets. **Which store, which item and which
+  keys is not written here**, because the cluster answers it and a file cannot go stale:
+
+      kubectl -n typst-mcp get externalsecret -o jsonpath='{range .items[*]}{.metadata.name}{" store="}{.spec.secretStoreRef.name}{"\n"}{end}'
+      kubectl -n typst-mcp get externalsecret <name> -o jsonpath='{range .spec.data[*]}{.secretKey}{" <- "}{.remoteRef.key}{"/"}{.remoteRef.property}{"\n"}{end}'
+
+  Two of them: the app's own secrets, and the registry pull credential, which is shared
+  with the other MCP servers rather than being this app's. Both were previously enumerated
+  here by name. That was a list of where credentials live, in a file this repository serves
+  publicly on both remotes, and it was **discoverable from the cluster anyway**, so it
+  bought a reader nothing they could not get with the command above and saved an outsider a
+  search. `jlxq0/typst-mcp#22`.
+- `OIDC_AUDIENCE`, `OIDC_TENANT_ID`, `DCR_CLIENT_ID` and the redirect allowlist are
+  reviewed public deployment values, set in plain env rather than through a secret.
 
 ## Verified environment facts (2026-08-17)
 
